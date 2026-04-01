@@ -4,8 +4,6 @@ import { withSentryConfig } from '@sentry/nextjs';
 const nextConfig: NextConfig = {
   reactCompiler: true,
 
-  allowedDevOrigins: ['10.0.0.15'],
-
   images: {
     remotePatterns: [
       { protocol: 'https', hostname: '*.supabase.co' },
@@ -29,4 +27,7 @@ export default withSentryConfig(nextConfig, {
   authToken: process.env.SENTRY_AUTH_TOKEN,
   widenClientFileUpload: true,
   disableLogger: true,
+  // Disable auto-injected script tags that cause React warnings
+  autoInstrumentServerFunctions: false,
+  autoInstrumentMiddleware: false,
 });
