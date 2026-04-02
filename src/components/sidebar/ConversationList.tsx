@@ -14,7 +14,8 @@ const MODEL_COLORS: Record<string, string> = {
   'gpt-5-mini': 'var(--model-gpt)',
   'gemini-3.1-pro': 'var(--model-gemini)',
   'gemini-3-flash': 'var(--model-gemini)',
-  'glm-5': 'var(--model-glm)',
+  'glm-4.7': 'var(--model-glm)',
+  'glm-4.6': 'var(--model-glm)',
 };
 
 interface ConversationListProps {

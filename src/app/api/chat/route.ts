@@ -7,7 +7,7 @@
 
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { classifyIntent } from '@/lib/ai/classifier';
+import { classifyIntent, routeByComplexity } from '@/lib/ai/classifier';
 import { retrieveMemories } from '@/lib/memory/rag-pipeline';
 import { assembleContext } from '@/lib/memory/context-assembler';
 import { streamGPT } from '@/lib/ai/openai';
@@ -123,9 +123,15 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Determine actual model (with routing overrides)
-  const actualModel =
-    intent.routeOverride !== 'none' ? intent.routeOverride : model;
+  // Determine actual model (with routing overrides + complexity routing)
+  let actualModel: string;
+  if (intent.routeOverride !== 'none') {
+    // Special routes (image gen, web search, vision) override everything
+    actualModel = intent.routeOverride;
+  } else {
+    // Smart complexity routing: downgrade easy questions, upgrade hard ones
+    actualModel = routeByComplexity(model, intent.complexity);
+  }
 
   // ═══ LAYER 2: MEMORY RETRIEVAL (RAG) + Reranking ═══
   let ragContext = '';
@@ -210,10 +216,12 @@ export async function POST(req: NextRequest) {
               signal: abortController.signal,
             });
             break;
-          case 'glm-5':
+          case 'glm-4.7':
+          case 'glm-4.6':
             generator = streamGLM({
               systemPrompt,
               messages: assembledMessages,
+              model: actualModel as 'glm-4.7' | 'glm-4.6',
               userId: user.id,
               conversationId: conversationId || undefined,
               signal: abortController.signal,

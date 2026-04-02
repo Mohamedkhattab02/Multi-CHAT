@@ -5,7 +5,7 @@
 export const MODELS = {
   'gpt-5.1': {
     name: 'GPT 5.1',
-    shortName: 'GPT 5.1',
+    shortName: 'ChatGPT',
     provider: 'openai',
     color: '#10B981',
     contextWindow: 128000,
@@ -25,7 +25,7 @@ export const MODELS = {
   },
   'gemini-3.1-pro': {
     name: 'Gemini 3.1 Pro',
-    shortName: 'Gemini Pro',
+    shortName: 'Gemini',
     provider: 'google',
     color: '#3B82F6',
     contextWindow: 1000000,
@@ -53,13 +53,23 @@ export const MODELS = {
     costPerMInput: 0.075,
     costPerMOutput: 0.3,
   },
-  'glm-5': {
-    name: 'GLM 5',
-    shortName: 'GLM 5',
+  'glm-4.7': {
+    name: 'GLM 4.7',
+    shortName: 'GLM',
     provider: 'zhipu',
     color: '#7C3AED',
     contextWindow: 128000,
     outputLimit: 8192,
+    costPerMInput: 0.5,
+    costPerMOutput: 0.5,
+  },
+  'glm-4.6': {
+    name: 'GLM 4.6',
+    shortName: 'GLM 4.6',
+    provider: 'zhipu',
+    color: '#7C3AED',
+    contextWindow: 128000,
+    outputLimit: 4096,
     costPerMInput: 0.1,
     costPerMOutput: 0.1,
   },
@@ -70,7 +80,7 @@ export type ModelId = keyof typeof MODELS;
 export const USER_SELECTABLE_MODELS: ModelId[] = [
   'gpt-5.1',
   'gemini-3.1-pro',
-  'glm-5',
+  'glm-4.7',
 ];
 
 export const DEFAULT_MODEL: ModelId = 'gemini-3.1-pro';
@@ -85,5 +95,6 @@ export const TOKEN_BUDGETS = {
   'gemini-3.1-pro':{ system: 2000, rag: 8000, history: 16000, output: 8000 },
   'gemini-3-flash':{ system: 1000, rag: 4000, history: 8000, output: 4000 },
   'gemini-3.1-flash-image': { system: 1000, rag: 2000, history: 4000, output: 2000 },
-  'glm-5':         { system: 2000, rag: 4000, history: 8000, output: 4000 },
+  'glm-4.7':       { system: 2000, rag: 4000, history: 8000, output: 4000 },
+  'glm-4.6':       { system: 1000, rag: 2000, history: 4000, output: 2000 },
 } as const;

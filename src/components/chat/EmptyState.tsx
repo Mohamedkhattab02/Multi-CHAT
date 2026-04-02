@@ -5,7 +5,7 @@ import { Lightbulb, Bug, PenLine, BarChart3, Sparkles } from 'lucide-react';
 const SUGGESTIONS = [
   { icon: Lightbulb, text: 'Explain quantum computing in simple terms', color: 'var(--model-gpt)' },
   { icon: Bug, text: 'Debug my JavaScript code', color: 'var(--model-gemini)' },
-  { icon: PenLine, text: 'Write a professional email', color: 'var(--model-glm)' },
+  { icon: PenLine, text: 'Write a professional email', color: 'var(--model-gemini)' },
   { icon: BarChart3, text: 'Analyze this data and give insights', color: 'var(--model-gemini)' },
 ];
 

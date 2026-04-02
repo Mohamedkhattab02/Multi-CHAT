@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Message } from '@/lib/supabase/types';
 
-type ModelId = 'gpt-5.1' | 'gpt-5-mini' | 'gemini-3.1-pro' | 'gemini-3-flash' | 'gemini-3.1-flash-image' | 'glm-5';
+type ModelId = 'gpt-5.1' | 'gpt-5-mini' | 'gemini-3.1-pro' | 'gemini-3-flash' | 'gemini-3.1-flash-image' | 'glm-4.7' | 'glm-4.6';
 
 interface ChatStore {
   // Active conversation

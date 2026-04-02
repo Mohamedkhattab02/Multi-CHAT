@@ -1,6 +1,7 @@
 // ============================================================
-// GLM 5 streaming handler (ZhipuAI / BigModel API)
+// GLM streaming handler (ZhipuAI / BigModel API)
 // Uses OpenAI-compatible API format
+// Strong: GLM 4.7 | Simple: GLM 4.6
 // ============================================================
 
 import * as Sentry from '@sentry/nextjs';
@@ -9,6 +10,7 @@ import type { StreamEvent } from './openai';
 interface StreamGLMParams {
   systemPrompt: string;
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  model: 'glm-4.7' | 'glm-4.6';
   userId?: string;
   conversationId?: string;
   signal?: AbortSignal;
@@ -16,10 +18,18 @@ interface StreamGLMParams {
 
 const GLM_API_BASE = 'https://open.bigmodel.cn/api/v4/chat/completions';
 
-const COST_PER_M = { input: 0.1, output: 0.1 };
+const COST_PER_M: Record<string, { input: number; output: number }> = {
+  'glm-4.7': { input: 0.5, output: 0.5 },
+  'glm-4.6': { input: 0.1, output: 0.1 },
+};
+
+const MODEL_MAP: Record<string, string> = {
+  'glm-4.7': 'glm-4-plus',
+  'glm-4.6': 'glm-4-flash',
+};
 
 export async function* streamGLM(params: StreamGLMParams): AsyncGenerator<StreamEvent> {
-  const { systemPrompt, messages, signal } = params;
+  const { systemPrompt, messages, model, signal } = params;
 
   try {
     const response = await fetch(GLM_API_BASE, {
@@ -29,13 +39,13 @@ export async function* streamGLM(params: StreamGLMParams): AsyncGenerator<Stream
         'Authorization': `Bearer ${process.env.GLM_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'glm-5',
+        model: MODEL_MAP[model] || model,
         stream: true,
         messages: [
           { role: 'system', content: systemPrompt },
           ...messages,
         ],
-        max_tokens: 4096,
+        max_tokens: model === 'glm-4.7' ? 8192 : 4096,
         temperature: 0.7,
       }),
       signal,
@@ -93,9 +103,10 @@ export async function* streamGLM(params: StreamGLMParams): AsyncGenerator<Stream
       }
     }
 
+    const costs = COST_PER_M[model] || COST_PER_M['glm-4.6'];
     const cost =
-      (inputTokens / 1_000_000) * COST_PER_M.input +
-      (outputTokens / 1_000_000) * COST_PER_M.output;
+      (inputTokens / 1_000_000) * costs.input +
+      (outputTokens / 1_000_000) * costs.output;
 
     yield {
       type: 'done',
@@ -105,7 +116,7 @@ export async function* streamGLM(params: StreamGLMParams): AsyncGenerator<Stream
   } catch (error) {
     if (signal?.aborted) return;
     Sentry.captureException(error, {
-      tags: { model: 'glm-5', action: 'stream_glm' },
+      tags: { model, action: 'stream_glm' },
     });
     yield { type: 'error', text: `GLM error: ${error instanceof Error ? error.message : 'Unknown error'}` };
   }

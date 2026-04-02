@@ -1,9 +1,10 @@
 // ============================================================
 // Smart Intent Classifier — Layer 1 of 7-layer memory system
 // Routes queries to the best model based on intent + complexity
-// Uses Gemini 2.0 Flash (non-thinking, reliable JSON mode)
+// Uses Gemini 2.5 Flash for classification (fast + cheap)
 // ============================================================
 
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { z } from 'zod';
 import * as Sentry from '@sentry/nextjs';
 
@@ -25,13 +26,8 @@ const ClassificationSchema = z.object({
 
 export type ClassificationResult = z.infer<typeof ClassificationSchema>;
 
-// ── Fast regex paths (skip LLM entirely) ──
-
-const IMAGE_GEN_PATTERNS = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make a picture|design an image)\b/i;
-const WEB_SEARCH_PATTERNS = /\b(מזג אוויר|weather|today|latest|current|news|חדשות|score|price|מחיר|שער|stock|search|חפש|what happened|who won|trending)\b/i;
-const CODE_PATTERNS = /\b(code|function|class|debug|error|bug|implement|refactor|typescript|javascript|python|java|rust|go|cpp|c\+\+|sql|html|css|react|api|algorithm|regex|קוד|פונקציה|תכתוב|programm)\b/i;
-const HEBREW_PATTERNS = /[\u0590-\u05FF]/;
-const ARABIC_PATTERNS = /[\u0600-\u06FF]/;
+const IMAGE_GEN_PATTERNS = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make a picture|design)\b/i;
+const WEB_SEARCH_PATTERNS = /\b(מזג אוויר|weather|today|latest|current|news|חדשות|score|price|מחיר|שער|stock|search|חפש|what happened|who won)\b/i;
 
 const FALLBACK: ClassificationResult = {
   intent: 'question',
@@ -43,95 +39,45 @@ const FALLBACK: ClassificationResult = {
   routeOverride: 'none',
   suggestedModel: 'auto',
   language: 'auto',
-  mainTopic: 'general',
+  mainTopic: 'unknown',
 };
 
-// ── Response schema for Gemini JSON mode ──
-
-const RESPONSE_SCHEMA = {
-  type: 'OBJECT',
-  properties: {
-    intent: {
-      type: 'STRING',
-      enum: ['question', 'code', 'analysis', 'chitchat', 'creative', 'command', 'image_gen', 'web_search', 'image_analysis'],
-    },
-    complexity: {
-      type: 'STRING',
-      enum: ['low', 'medium', 'high'],
-    },
-    needsRAG: { type: 'BOOLEAN' },
-    needsInternet: { type: 'BOOLEAN' },
-    hasImageInput: { type: 'BOOLEAN' },
-    needsImageGeneration: { type: 'BOOLEAN' },
-    routeOverride: {
-      type: 'STRING',
-      enum: ['gemini-3-flash', 'gemini-3.1-flash-image', 'none'],
-    },
-    suggestedModel: { type: 'STRING' },
-    language: {
-      type: 'STRING',
-      enum: ['en', 'he', 'ar', 'auto'],
-    },
-    mainTopic: { type: 'STRING' },
-  },
-  required: [
-    'intent', 'complexity', 'needsRAG', 'needsInternet',
-    'hasImageInput', 'needsImageGeneration', 'routeOverride',
-    'suggestedModel', 'language', 'mainTopic',
-  ],
+// ── Complexity-based model routing ──
+// Maps user-selected model → simpler variant for easy questions
+const MODEL_DOWNGRADE: Record<string, string> = {
+  'gpt-5.1':        'gpt-5-mini',
+  'gemini-3.1-pro':  'gemini-3-flash',
+  'glm-4.7':        'glm-4.6',
 };
 
-const SYSTEM_INSTRUCTION = `You are an intent classifier for a multi-model AI chat platform. Classify user messages into structured JSON.
+// Maps user-selected model → stronger variant for hard questions
+const MODEL_UPGRADE: Record<string, string> = {
+  'gpt-5-mini':     'gpt-5.1',
+  'gemini-3-flash':  'gemini-3.1-pro',
+  'glm-4.6':        'glm-4.7',
+};
 
-INTENT TYPES:
-- "chitchat": greetings, small talk, how are you, thanks
-- "code": writing, debugging, explaining code, programming tasks
-- "question": factual questions, explanations, how-to (non-code)
-- "analysis": data analysis, comparisons, evaluations
-- "creative": stories, poems, creative writing
-- "command": system commands, settings changes
-- "image_gen": requests to create/generate/draw images
-- "web_search": needs current/real-time data (weather, news, prices, scores)
-- "image_analysis": analyzing an uploaded image
-
-COMPLEXITY:
-- "low": simple greetings, yes/no questions, basic requests
-- "medium": standard questions, moderate code tasks
-- "high": complex analysis, multi-step code, deep explanations
-
-ROUTING RULES:
-- needsInternet=true → routeOverride:"gemini-3-flash" (has search grounding)
-- needsImageGeneration=true → routeOverride:"gemini-3.1-flash-image"
-- All other cases → routeOverride:"none"
-
-LANGUAGE DETECTION:
-- Hebrew script (אבגד) → "he"
-- Arabic script (ابتث) → "ar"
-- Latin script → "en"
-- Mixed or unclear → "auto"
-
-RAG (memory retrieval):
-- needsRAG=true for: questions about past conversations, personal preferences, factual Q&A, code help
-- needsRAG=false for: chitchat, greetings, image gen, web search
-
-suggestedModel should always be "auto".`;
-
-// ── Detect language from script ──
-
-function detectLanguage(text: string): 'en' | 'he' | 'ar' | 'auto' {
-  if (HEBREW_PATTERNS.test(text)) return 'he';
-  if (ARABIC_PATTERNS.test(text)) return 'ar';
-  return 'auto';
+/**
+ * Given the user's chosen model and classified complexity,
+ * return the optimal model variant.
+ *   - low  → downgrade to cheap/fast variant
+ *   - high → upgrade to strong/thinking variant
+ *   - medium → keep as-is
+ */
+export function routeByComplexity(userModel: string, complexity: string): string {
+  if (complexity === 'low' && MODEL_DOWNGRADE[userModel]) {
+    return MODEL_DOWNGRADE[userModel];
+  }
+  if (complexity === 'high' && MODEL_UPGRADE[userModel]) {
+    return MODEL_UPGRADE[userModel];
+  }
+  return userModel;
 }
-
-// ── Main classifier ──
 
 export async function classifyIntent(
   message: string,
   hasImageAttachment: boolean = false
 ): Promise<ClassificationResult> {
-  const detectedLang = detectLanguage(message);
-
   // Fast path: image attachment → Gemini Flash (vision)
   if (hasImageAttachment) {
     return {
@@ -142,8 +88,8 @@ export async function classifyIntent(
       hasImageInput: true,
       needsImageGeneration: false,
       routeOverride: 'gemini-3-flash',
-      suggestedModel: 'auto',
-      language: detectedLang,
+      suggestedModel: 'gemini-3-flash',
+      language: 'auto',
       mainTopic: 'image analysis',
     };
   }
@@ -158,8 +104,8 @@ export async function classifyIntent(
       hasImageInput: false,
       needsImageGeneration: true,
       routeOverride: 'gemini-3.1-flash-image',
-      suggestedModel: 'auto',
-      language: detectedLang,
+      suggestedModel: 'gemini-3.1-flash-image',
+      language: 'auto',
       mainTopic: 'image generation',
     };
   }
@@ -174,72 +120,94 @@ export async function classifyIntent(
       hasImageInput: false,
       needsImageGeneration: false,
       routeOverride: 'gemini-3-flash',
-      suggestedModel: 'auto',
-      language: detectedLang,
+      suggestedModel: 'gemini-3-flash',
+      language: 'auto',
       mainTopic: 'web search',
     };
   }
 
-  // Fast path: code-related (skip LLM, classify locally)
-  if (CODE_PATTERNS.test(message)) {
+  // Fast path: short/simple messages (greetings, chitchat) — skip LLM call
+  const trimmed = message.trim();
+  if (trimmed.split(/\s+/).length <= 5 && /^(hi|hello|hey|שלום|مرحبا|أهلا|thanks|thank you|ok|bye|good morning|good night|בוקר טוב|לילה טוב|מה נשמע|מה שלומך|מה קורה|how are you|כן|לא|תודה|يا هلا|شكرا|كيف حالك|صباح الخير|مساء الخير|אהלן|היי)/i.test(trimmed)) {
     return {
-      intent: 'code',
-      complexity: message.length > 200 ? 'high' : 'medium',
-      needsRAG: true,
+      intent: 'chitchat',
+      complexity: 'low',
+      needsRAG: false,
       needsInternet: false,
       hasImageInput: false,
       needsImageGeneration: false,
       routeOverride: 'none',
       suggestedModel: 'auto',
-      language: detectedLang,
-      mainTopic: 'programming',
+      language: 'auto',
+      mainTopic: 'chitchat',
     };
   }
 
-  // Full LLM classification for ambiguous queries
+  // Full LLM classification using Gemini 2.5 Flash
   try {
-    const response = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': process.env.GOOGLE_AI_API_KEY!,
+    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY!);
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-2.5-flash',
+      generationConfig: {
+        maxOutputTokens: 300,
+        temperature: 0,
+      },
+    });
+
+    const result = await model.generateContent({
+      contents: [
+        {
+          role: 'user',
+          parts: [{
+            text: `You are a multilingual query classifier. The user message can be in ANY language (English, Hebrew, Arabic, etc.). The language does NOT affect complexity — classify based on the MEANING, not the language.
+
+Return ONLY valid JSON, no markdown, no explanation.
+
+{"intent":"question|code|analysis|chitchat|creative|command|image_gen|web_search",
+"complexity":"low|medium|high",
+"needsRAG":true|false,
+"needsInternet":true|false,
+"hasImageInput":false,
+"needsImageGeneration":true|false,
+"routeOverride":"gemini-3-flash|gemini-3.1-flash-image|none",
+"suggestedModel":"auto",
+"language":"en|he|ar|auto",
+"mainTopic":"brief topic"}
+
+COMPLEXITY RULES (apply equally to ALL languages):
+- low: greetings (hi, שלום, مرحبا), chitchat (מה נשמע, how are you, كيف حالك), simple factual questions, short translations, simple math, yes/no questions, small talk
+- medium: explanations, summaries, moderate code questions, creative writing
+- high: complex code generation/debugging, deep analysis, multi-step reasoning, research, architecture design
+
+EXAMPLES:
+- "שלום מה שלומך" → complexity:low, intent:chitchat
+- "מה זה פייתון" → complexity:low, intent:question
+- "תסביר לי מה זה API" → complexity:medium, intent:question
+- "כתוב לי פונקציה שממיינת מערך" → complexity:high, intent:code
+- "hi" → complexity:low, intent:chitchat
+- "explain quantum computing" → complexity:medium, intent:question
+
+ROUTING RULES:
+- If query needs real-time data, current info, or internet → routeOverride:"gemini-3-flash", needsInternet:true
+- If query asks to generate/create/draw an image → routeOverride:"gemini-3.1-flash-image", needsImageGeneration:true
+- chitchat/greetings → needsRAG:false, complexity:low
+- Code/analysis → needsRAG:true, complexity:high
+- Simple factual → needsRAG:false, complexity:low
+- Explanations → needsRAG:true, complexity:medium or high depending on depth
+
+User message: ${message}`,
+          }],
         },
-        body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: SYSTEM_INSTRUCTION }],
-          },
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: `Classify this user message:\n\n${message}` }],
-            },
-          ],
-          generationConfig: {
-            maxOutputTokens: 256,
-            temperature: 0,
-            responseMimeType: 'application/json',
-            responseSchema: RESPONSE_SCHEMA,
-          },
-        }),
-      }
-    );
+      ],
+    });
 
-    if (!response.ok) {
-      const errBody = await response.text().catch(() => '');
-      throw new Error(`Gemini classifier ${response.status}: ${errBody.slice(0, 200)}`);
-    }
+    const text = result.response.text();
 
-    const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    // Extract JSON from response (handle markdown code blocks)
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON in classifier response');
 
-    if (!text) {
-      const finishReason = data.candidates?.[0]?.finishReason;
-      throw new Error(`Empty classifier response (finishReason: ${finishReason})`);
-    }
-
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(jsonMatch[0]);
     return ClassificationSchema.parse(parsed);
   } catch (error) {
     Sentry.captureException(error, {
@@ -247,8 +215,6 @@ export async function classifyIntent(
       extra: { messageLength: message.length },
     });
     console.error('[Classifier] Failed, using fallback:', error);
-
-    // Fallback with at least correct language
-    return { ...FALLBACK, language: detectedLang };
+    return FALLBACK;
   }
 }
