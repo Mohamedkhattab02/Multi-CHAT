@@ -1,9 +1,17 @@
 'use client';
 
+import { useCallback, useEffect } from 'react';
 import { type Conversation, type Message } from '@/lib/supabase/types';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { useSidebarStore } from '@/lib/store/sidebar-store';
+import { useChatStore } from '@/lib/store/chat-store';
+import { useMessages } from '@/lib/hooks/use-messages';
+import { useStreaming } from '@/lib/hooks/use-streaming';
+import { MessageList } from './MessageList';
+import { ChatInput } from './ChatInput';
+import { EmptyState } from './EmptyState';
 import { PanelLeft, Share2, MoreHorizontal } from 'lucide-react';
+import { toast } from 'sonner';
 
 interface ChatAreaProps {
   conversation: Conversation;
@@ -11,10 +19,101 @@ interface ChatAreaProps {
   userId: string;
 }
 
-export function ChatArea({ conversation, initialMessages }: ChatAreaProps) {
+export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProps) {
   const { isOpen, toggle } = useSidebarStore();
+  const { selectedModel, setSelectedModel, setActiveConversation } = useChatStore();
+
   const model = MODELS[conversation.model as ModelId];
   const modelColor = model?.color ?? '#737373';
+
+  // Initialize from conversation
+  useEffect(() => {
+    setActiveConversation(conversation.id);
+    setSelectedModel(conversation.model as ModelId);
+  }, [conversation.id, conversation.model, setActiveConversation, setSelectedModel]);
+
+  // Messages from react-query (uses initialMessages as seed, then syncs with DB)
+  const {
+    messages,
+    addMessages,
+    deleteMessage: handleDeleteMessage,
+    refetch: refetchMessages,
+  } = useMessages(conversation.id);
+
+  // Use initial messages until react-query hydrates
+  const displayMessages = messages.length > 0 ? messages : initialMessages;
+
+  // Streaming
+  const {
+    isStreaming,
+    streamingContent,
+    routeOverride,
+    sendMessage,
+    stopStreaming,
+  } = useStreaming();
+
+  const handleSend = useCallback(
+    async (
+      text: string,
+      attachments: Array<{ file: File; type: string; name: string; size: number }>
+    ) => {
+      if (!text.trim() && attachments.length === 0) return;
+
+      // Convert file attachments to serializable format
+      const serializedAttachments = await Promise.all(
+        attachments.map(async (att) => {
+          let data: string | undefined;
+          if (att.type.startsWith('image/')) {
+            data = await fileToBase64(att.file);
+          }
+          return {
+            type: att.type,
+            name: att.name,
+            size: att.size,
+            data,
+          };
+        })
+      );
+
+      try {
+        await sendMessage({
+          message: text,
+          conversationId: conversation.id,
+          model: selectedModel,
+          attachments: serializedAttachments,
+          onMessageSaved: (userMsg, assistantMsg) => {
+            addMessages([userMsg, assistantMsg]);
+            // Refetch from DB to get real IDs and sync state
+            setTimeout(() => refetchMessages(), 500);
+          },
+        });
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : 'Failed to send message'
+        );
+      }
+    },
+    [conversation.id, selectedModel, sendMessage, addMessages, refetchMessages]
+  );
+
+  const handleRegenerate = useCallback(
+    async (messageId: string) => {
+      // Find the last user message before this assistant message
+      const msgIndex = displayMessages.findIndex((m) => m.id === messageId);
+      if (msgIndex <= 0) return;
+
+      const userMsg = displayMessages
+        .slice(0, msgIndex)
+        .reverse()
+        .find((m) => m.role === 'user');
+      if (!userMsg) return;
+
+      // Delete the old assistant message and resend
+      handleDeleteMessage(messageId);
+      await handleSend(userMsg.content, []);
+    },
+    [displayMessages, handleDeleteMessage, handleSend]
+  );
 
   return (
     <div className="flex flex-col h-full">
@@ -54,62 +153,41 @@ export function ChatArea({ conversation, initialMessages }: ChatAreaProps) {
       </div>
 
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto chat-scroll">
-        <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
-          {initialMessages.length === 0 && (
-            <div className="text-center text-sm text-[var(--muted-foreground)] mt-12 animate-fade-in">
-              <p>Start the conversation below</p>
-            </div>
-          )}
-          {initialMessages.map((msg, i) => (
-            <div
-              key={msg.id}
-              className="animate-fade-in"
-              style={{ animationDelay: `${Math.min(i * 30, 300)}ms` }}
-            >
-              {msg.role === 'user' ? (
-                <div className="flex justify-end">
-                  <div className="max-w-[80%] rounded-2xl rounded-br-md px-4 py-3 text-sm bg-[var(--primary)] text-[var(--primary-foreground)] leading-relaxed">
-                    {msg.content}
-                  </div>
-                </div>
-              ) : (
-                <div className="flex gap-3">
-                  <div
-                    className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 text-white text-[10px] font-bold"
-                    style={{ backgroundColor: modelColor }}
-                  >
-                    {(model?.shortName ?? 'AI').charAt(0)}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="rounded-2xl rounded-tl-md px-4 py-3 text-sm bg-[var(--secondary)] text-[var(--foreground)] leading-relaxed">
-                      {msg.content}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
+      {displayMessages.length === 0 && !isStreaming ? (
+        <EmptyState />
+      ) : (
+        <MessageList
+          messages={displayMessages}
+          isStreaming={isStreaming}
+          streamingContent={streamingContent}
+          streamingModel={selectedModel}
+          routeOverride={routeOverride}
+          onStopStreaming={stopStreaming}
+          onRegenerate={handleRegenerate}
+          onDelete={handleDeleteMessage}
+        />
+      )}
 
-      {/* Input placeholder */}
-      <div className="border-t border-[var(--border)] bg-[var(--card)]">
-        <div className="max-w-3xl mx-auto px-4 py-3">
-          <div className="flex items-center gap-3 p-3.5 border border-[var(--border)] rounded-xl bg-[var(--background)] text-sm text-[var(--muted-foreground)] transition-all duration-200 hover:border-[var(--ring)]/30">
-            <span className="flex-1">Message MultiChat AI...</span>
-            <span
-              className="text-[10px] font-semibold px-2 py-0.5 rounded-full text-white"
-              style={{ backgroundColor: modelColor }}
-            >
-              {model?.shortName ?? conversation.model}
-            </span>
-          </div>
-          <p className="text-center text-[10px] text-[var(--muted-foreground)] mt-2">
-            Full chat input coming in Phase 2 — Tiptap editor, voice input, file attachments
-          </p>
-        </div>
-      </div>
+      {/* Chat input */}
+      <ChatInput
+        selectedModel={selectedModel}
+        onModelChange={setSelectedModel}
+        onSend={handleSend}
+        isStreaming={isStreaming}
+      />
     </div>
   );
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // Remove data URL prefix
+      resolve(result.split(',')[1]);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
