@@ -15,6 +15,7 @@ import { streamGemini } from '@/lib/ai/gemini';
 import { streamGLM } from '@/lib/ai/glm';
 import { generateImage } from '@/lib/ai/gemini-image';
 import { generateRollingSummary, generateTitle } from '@/lib/memory/rolling-summary';
+import { storeMessageEmbedding } from '@/lib/memory/embed-store';
 import { ChatMessageSchema } from '@/lib/security/validate';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
@@ -170,6 +171,10 @@ export async function POST(req: NextRequest) {
       model: actualModel,
       attachments: attachments || [],
     });
+
+    // Embed user message in background (for RAG retrieval)
+    storeMessageEmbedding(user.id, message, conversationId, 'user')
+      .catch((err) => Sentry.captureException(err, { tags: { action: 'embed_user_msg' } }));
   }
 
   const { systemPrompt, messages: assembledMessages } = assembleContext({
@@ -275,6 +280,12 @@ export async function POST(req: NextRequest) {
                 content_blocks: (event.contentBlocks ?? null) as import('@/lib/supabase/types').Json,
                 model: actualModel,
               });
+
+              // Embed assistant message in background (for RAG retrieval)
+              if (event.fullText) {
+                storeMessageEmbedding(user.id, event.fullText, conversationId, 'assistant')
+                  .catch((err) => Sentry.captureException(err, { tags: { action: 'embed_assistant_msg' } }));
+              }
 
               // Usage logging
               if (event.usage) {
