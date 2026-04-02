@@ -48,9 +48,47 @@
 ### ChatArea Integration
 - **`src/components/chat/ChatArea.tsx`** — Fully rewired to integrate: MessageList (virtual), ChatInput (Tiptap), streaming, model selection, regenerate, delete. Uses react-query for message sync.
 
+## Post-Phase 2 Fixes
+
+### Route Fix: `(chat)` → `chat`
+- **Problem:** `src/app/(chat)/` was a route group (parentheses = no URL segment). Root `page.tsx` redirected to `/chat` which didn't exist → **404**.
+- **Fix:** Renamed `(chat)` to `chat` so it becomes a real `/chat` URL segment.
+- Routes now: `/chat` (new chat), `/chat/[conversationId]` (existing conversation).
+
+### New Chat Page — Full Wiring
+- **`src/app/chat/page.tsx`** — Rewired as a proper "new chat" page: EmptyState + ChatInput + StreamingMessage. On first message: creates conversation via Supabase → streams response → navigates to `/chat/[id]`. Suggestions are clickable.
+- **`src/components/chat/EmptyState.tsx`** — Added `onSuggestionClick` prop so suggestion buttons trigger message send.
+
+### Gemini Model IDs Fix
+- **`src/lib/ai/gemini.ts`** — Fixed MODEL_MAP: `gemini-3.1-pro` → `gemini-3.1-pro-preview`, `gemini-3-flash` → `gemini-3-flash-preview` (actual API model names).
+
+### Classifier — Full Rewrite (Layer 1)
+- **`src/lib/ai/classifier.ts`** — Complete rewrite:
+  - Switched from `gemini-3-flash-preview` to `gemini-2.5-flash` (stable JSON mode support).
+  - Fixed API key: `GEMINI_API_KEY` → `GOOGLE_AI_API_KEY`.
+  - Added `responseMimeType: "application/json"` + `responseSchema` for guaranteed structured JSON output.
+  - Added `systemInstruction` with routing rules instead of inline prompt.
+  - `gemini-3-flash-preview` was a thinking model that used all tokens for thinking and failed on JSON. `gemini-2.5-flash` works reliably.
+
+### VoiceInput Hydration Fix
+- **`src/components/chat/VoiceInput.tsx`** — Moved `typeof window` check into `useEffect` to avoid server/client hydration mismatch.
+
+### Rolling Summary → Gemini 2.5 Flash
+- **`src/lib/memory/rolling-summary.ts`** — Switched from GLM (`glm-4-7b`) to Gemini 2.5 Flash for both `generateRollingSummary` and `generateTitle`. Uses REST API with `systemInstruction`.
+
+### UserMenu Hydration Fix
+- **`src/components/sidebar/UserMenu.tsx`** — Added `mounted` state to prevent hydration mismatch from `useTheme()` returning `undefined` on server.
+
+### Zod Schema Fix
+- **`src/lib/security/validate.ts`** — `ChatMessageSchema` attachments now accept MIME types (`image/jpeg` etc.) and optional `data` (base64). Previously required `url` (never sent by client) and enum types (`image|pdf|document`) which didn't match client format.
+
+### DB Schema & Route Fixes
+- **`supabase/migrations/001_initial_schema.sql`** — Fixed `conversations.model` default from `'GPT 5.1'` (display name) to `'gemini-3.1-pro'` (model ID). Applied to live DB.
+- **`src/app/api/chat/route.ts`** — Auto-title generation now also updates `conversation.model` to `actualModel` so DB tracks which model actually responded.
+
 ## File Count
-- **22 new/modified files** total
-- **0 TypeScript errors** (verified with `tsc --noEmit`)
+- **22 new/modified files** total (+ 10 fixed post-phase)
+- **0 TypeScript errors** (verified with `next build`)
 
 ## Architecture Diagram
 

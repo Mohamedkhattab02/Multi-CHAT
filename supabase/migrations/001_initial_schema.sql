@@ -31,7 +31,7 @@ create table public.conversations (
   id uuid default gen_random_uuid() primary key,
   user_id uuid references public.users(id) on delete cascade not null,
   title text default 'New conversation',
-  model text not null default 'GPT 5.1',
+  model text not null default 'gemini-3.1-pro',
   summary text,
   system_prompt text,
   topic text,

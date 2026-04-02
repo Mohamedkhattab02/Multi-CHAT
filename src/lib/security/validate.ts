@@ -11,10 +11,11 @@ export const ChatMessageSchema = z.object({
   attachments: z
     .array(
       z.object({
-        url: z.string().url(),
-        type: z.enum(['image', 'pdf', 'document']),
+        type: z.string().max(100),
         name: z.string().max(255),
         size: z.number().max(10 * 1024 * 1024), // 10MB max
+        url: z.string().url().optional(),
+        data: z.string().optional(), // base64 for images
       })
     )
     .max(5)

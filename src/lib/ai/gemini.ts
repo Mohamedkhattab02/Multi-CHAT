@@ -18,8 +18,8 @@ interface StreamGeminiParams {
 }
 
 const MODEL_MAP: Record<string, string> = {
-  'gemini-3.1-pro': 'gemini-3.1-pro',
-  'gemini-3-flash': 'gemini-3-flash',
+  'gemini-3.1-pro': 'gemini-3.1-pro-preview',
+  'gemini-3-flash': 'gemini-3-flash-preview',
 };
 
 const COST_PER_M: Record<string, { input: number; output: number }> = {

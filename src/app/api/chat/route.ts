@@ -301,13 +301,17 @@ export async function POST(req: NextRequest) {
                   .catch((err) => Sentry.captureException(err));
               }
 
-              // Auto-generate title for new conversations
+              // Auto-generate title for new conversations + update model
               if (history.length === 0) {
                 generateTitle(message, event.fullText || '')
                   .then(async (title) => {
                     await supabase
                       .from('conversations')
-                      .update({ title, topic: intent.mainTopic })
+                      .update({
+                        title,
+                        topic: intent.mainTopic,
+                        model: actualModel,
+                      })
                       .eq('id', conversationId);
                   })
                   .catch((err) => Sentry.captureException(err));

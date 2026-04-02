@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { Mic, MicOff } from 'lucide-react';
 
 interface VoiceInputProps {
@@ -13,11 +13,15 @@ type SpeechRecognitionInstance = any;
 
 export function VoiceInput({ onTranscript, language = 'auto' }: VoiceInputProps) {
   const [isListening, setIsListening] = useState(false);
+  const [isSupported, setIsSupported] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionInstance>(null);
 
-  const isSupported =
-    typeof window !== 'undefined' &&
-    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+  // Check support only on client to avoid hydration mismatch
+  useEffect(() => {
+    setIsSupported(
+      'SpeechRecognition' in window || 'webkitSpeechRecognition' in window
+    );
+  }, []);
 
   const startListening = useCallback(() => {
     if (!isSupported) return;
@@ -67,6 +71,7 @@ export function VoiceInput({ onTranscript, language = 'auto' }: VoiceInputProps)
     setIsListening(false);
   }, []);
 
+  // Always render the same structure on server and client (hidden until supported)
   if (!isSupported) return null;
 
   return (

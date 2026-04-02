@@ -9,7 +9,11 @@ const SUGGESTIONS = [
   { icon: BarChart3, text: 'Analyze this data and give insights', color: 'var(--model-gemini)' },
 ];
 
-export function EmptyState() {
+interface EmptyStateProps {
+  onSuggestionClick?: (text: string) => void;
+}
+
+export function EmptyState({ onSuggestionClick }: EmptyStateProps = {}) {
   return (
     <div className="flex flex-col items-center justify-center h-full p-8 text-center">
       <div className="mb-10 space-y-4 animate-fade-in-up">
@@ -26,6 +30,7 @@ export function EmptyState() {
         {SUGGESTIONS.map((s) => (
           <button
             key={s.text}
+            onClick={() => onSuggestionClick?.(s.text)}
             className="flex items-start gap-3 p-4 text-left rounded-xl border border-[var(--border)] hover:border-[var(--primary)]/30 hover:bg-[var(--secondary)] transition-all duration-200 text-sm group cursor-pointer"
           >
             <div
