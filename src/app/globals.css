@@ -281,3 +281,88 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ============================================================
+   Tiptap editor styles
+   ============================================================ */
+.ProseMirror {
+  outline: none;
+}
+
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--muted-foreground);
+  pointer-events: none;
+  height: 0;
+}
+
+.ProseMirror p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ============================================================
+   Shiki code block styles
+   ============================================================ */
+.shiki {
+  margin: 0;
+  padding: 1rem;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+.shiki code {
+  background: none;
+  padding: 0;
+  border: none;
+  font-size: inherit;
+}
+
+/* Code with line numbers */
+.code-with-line-numbers .shiki code {
+  counter-reset: line;
+}
+
+.code-with-line-numbers .shiki code .line::before {
+  counter-increment: line;
+  content: counter(line);
+  display: inline-block;
+  width: 1.5rem;
+  margin-right: 1rem;
+  color: #4d5566;
+  text-align: right;
+  font-size: 11px;
+}
+
+/* ============================================================
+   Prose overrides for markdown content
+   ============================================================ */
+.prose {
+  color: var(--foreground);
+}
+
+.prose pre {
+  margin: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.prose code:not(pre code) {
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.875em;
+}
+
+.prose table {
+  border-collapse: collapse;
+}
+
+.prose img {
+  border-radius: 0.5rem;
+  max-width: 400px;
+}

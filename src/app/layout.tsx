@@ -4,6 +4,7 @@ import { ThemeProvider } from 'next-themes';
 import { QueryProvider } from '@/providers/QueryProvider';
 import { SentryProvider } from '@/providers/SentryProvider';
 import { ToastProvider } from '@/providers/ToastProvider';
+import 'katex/dist/katex.min.css';
 import './globals.css';
 
 const geistSans = Geist({

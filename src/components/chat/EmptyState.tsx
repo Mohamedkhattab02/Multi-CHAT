@@ -1,6 +1,7 @@
 'use client';
 
 import { Lightbulb, Bug, PenLine, BarChart3, Sparkles } from 'lucide-react';
+import type { ModelId } from '@/lib/utils/constants';
 
 const SUGGESTIONS = [
   { icon: Lightbulb, text: 'Explain quantum computing in simple terms', color: 'var(--model-gpt)' },
@@ -9,7 +10,14 @@ const SUGGESTIONS = [
   { icon: BarChart3, text: 'Analyze this data and give insights', color: 'var(--model-gemini)' },
 ];
 
-export function EmptyState() {
+interface EmptyStateProps {
+  onModelSelect?: (model: ModelId) => void;
+  selectedModel?: ModelId;
+}
+
+export function EmptyState({ onModelSelect, selectedModel }: EmptyStateProps) {
+  void onModelSelect;
+  void selectedModel;
   return (
     <div className="flex flex-col items-center justify-center h-full p-8 text-center">
       <div className="mb-10 space-y-4 animate-fade-in-up">

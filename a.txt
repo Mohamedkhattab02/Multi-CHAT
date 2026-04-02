@@ -1,0 +1,142 @@
+import { z } from 'zod';
+
+// ============================================================
+// INTENT CLASSIFIER — Smart routing with special overrides
+// Uses regex fast-path, then GLM 4 Flash for full classification
+// ============================================================
+
+const ClassificationSchema = z.object({
+  intent: z.enum(['question', 'code', 'analysis', 'chitchat', 'creative', 'command', 'image_gen', 'web_search', 'image_analysis']),
+  complexity: z.enum(['low', 'medium', 'high']),
+  needsRAG: z.boolean(),
+  needsInternet: z.boolean(),
+  hasImageInput: z.boolean(),
+  needsImageGeneration: z.boolean(),
+  routeOverride: z.enum(['gemini-3-flash', 'gemini-3.1-flash-image', 'none']),
+  suggestedModel: z.string(),
+  language: z.string(),
+  mainTopic: z.string(),
+});
+
+export type ClassificationResult = z.infer<typeof ClassificationSchema>;
+
+const IMAGE_GEN_PATTERNS = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make an image|design an image)\b/i;
+const WEB_SEARCH_PATTERNS = /\b(מזג אוויר|weather|today|latest|current|news|חדשות|score|price|מחיר|שער|stock|search|חפש|right now|at the moment)\b/i;
+
+export async function classifyIntent(
+  message: string,
+  hasImageAttachment: boolean = false
+): Promise<ClassificationResult> {
+  // Fast path: image attached → vision route
+  if (hasImageAttachment) {
+    return {
+      intent: 'image_analysis',
+      complexity: 'medium',
+      needsRAG: false,
+      needsInternet: false,
+      hasImageInput: true,
+      needsImageGeneration: false,
+      routeOverride: 'gemini-3-flash',
+      suggestedModel: 'gemini-3-flash',
+      language: 'auto',
+      mainTopic: 'image analysis',
+    };
+  }
+
+  // Fast path: image generation request
+  if (IMAGE_GEN_PATTERNS.test(message)) {
+    return {
+      intent: 'image_gen',
+      complexity: 'medium',
+      needsRAG: false,
+      needsInternet: false,
+      hasImageInput: false,
+      needsImageGeneration: true,
+      routeOverride: 'gemini-3.1-flash-image',
+      suggestedModel: 'gemini-3.1-flash-image',
+      language: 'auto',
+      mainTopic: 'image generation',
+    };
+  }
+
+  // Fast path: real-time web search request
+  if (WEB_SEARCH_PATTERNS.test(message)) {
+    return {
+      intent: 'web_search',
+      complexity: 'medium',
+      needsRAG: false,
+      needsInternet: true,
+      hasImageInput: false,
+      needsImageGeneration: false,
+      routeOverride: 'gemini-3-flash',
+      suggestedModel: 'gemini-3-flash',
+      language: 'auto',
+      mainTopic: 'web search',
+    };
+  }
+
+  // Full LLM classification via GLM
+  try {
+    const response = await fetch('https://open.bigmodel.cn/api/v4/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.GLM_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'glm-4-flash',
+        max_tokens: 300,
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content: `Classify the user message. Return ONLY valid JSON, no markdown:
+{"intent":"question|code|analysis|chitchat|creative|command|image_gen|web_search",
+"complexity":"low|medium|high",
+"needsRAG":true|false,
+"needsInternet":true|false,
+"hasImageInput":false,
+"needsImageGeneration":true|false,
+"routeOverride":"gemini-3-flash|gemini-3.1-flash-image|none",
+"suggestedModel":"auto",
+"language":"en|he|ar|auto",
+"mainTopic":"brief topic"}
+
+RULES:
+- real-time/current/internet queries → routeOverride:"gemini-3-flash", needsInternet:true
+- image generation → routeOverride:"gemini-3.1-flash-image", needsImageGeneration:true
+- chitchat/greetings → needsRAG:false, complexity:low
+- code/analysis/explain → needsRAG:true, complexity:high`,
+          },
+          { role: 'user', content: message },
+        ],
+      }),
+    });
+
+    if (!response.ok) throw new Error(`GLM API error: ${response.status}`);
+
+    const data = await response.json();
+    const text: string = data.choices?.[0]?.message?.content ?? '';
+
+    // Strip markdown code fences if model wraps JSON
+    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return ClassificationSchema.parse(parsed);
+  } catch (error) {
+    console.error('[Classifier] Failed, using safe fallback:', error);
+
+    // Safe fallback — never crash the chat
+    return {
+      intent: 'question',
+      complexity: 'medium',
+      needsRAG: true,
+      needsInternet: false,
+      hasImageInput: false,
+      needsImageGeneration: false,
+      routeOverride: 'none',
+      suggestedModel: 'auto',
+      language: 'auto',
+      mainTopic: 'unknown',
+    };
+  }
+}

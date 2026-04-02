@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import { LogOut, Sun, Moon, Monitor } from 'lucide-react';
 import { useTheme } from 'next-themes';
+import { useState, useEffect } from 'react';
 
 const THEME_OPTIONS = [
   { value: 'light', icon: Sun, label: 'Light' },
@@ -14,6 +15,8 @@ const THEME_OPTIONS = [
 export function UserMenu() {
   const router = useRouter();
   const { theme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   async function handleSignOut() {
     const supabase = createClient();
@@ -31,7 +34,7 @@ export function UserMenu() {
             key={value}
             onClick={() => setTheme(value)}
             className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-[10px] font-medium transition-all duration-200 cursor-pointer ${
-              theme === value
+              mounted && theme === value
                 ? 'bg-[var(--card)] text-[var(--foreground)] shadow-sm'
                 : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'
             }`}

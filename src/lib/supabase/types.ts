@@ -463,3 +463,11 @@ export type Embedding = Database['public']['Tables']['embeddings']['Row'];
 export type UserEntity = Database['public']['Tables']['user_entities']['Row'];
 export type UserEntityRelation = Database['public']['Tables']['user_entity_relations']['Row'];
 export type UsageLog = Database['public']['Tables']['usage_logs']['Row'];
+
+// Attachment type — stored as JSON in messages.attachments
+export interface Attachment {
+  url: string;
+  type: 'image' | 'pdf' | 'document';
+  name: string;
+  size: number;
+}
