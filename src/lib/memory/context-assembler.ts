@@ -1,10 +1,16 @@
 // ============================================================
 // Context Assembler — Layer 3 of 7-layer memory system
 // Builds the final messages array with strict token budgets
+//
+// KEY DESIGN: Receives only the last 5 messages as direct history.
+// RAG context (from Layer 2) fills in relevant older context.
+// Rolling summary (from Layer 6) provides high-level continuity.
+// This 3-source approach keeps token usage low while maintaining
+// full conversation awareness.
 // ============================================================
 
 import { TOKEN_BUDGETS, type ModelId } from '@/lib/utils/constants';
-import { estimateTokens, estimateMessagesTokens } from '@/lib/utils/tokens';
+import { estimateTokens } from '@/lib/utils/tokens';
 
 interface AssembleParams {
   model: string;
@@ -37,7 +43,8 @@ export function assembleContext(params: AssembleParams): AssembledContext {
 
   const assembledMessages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
 
-  // Inject rolling summary as pseudo-message for long conversations
+  // Layer 6: Rolling summary provides high-level conversation continuity
+  // This is especially important now that we only send 5 recent messages
   if (params.rollingSummary) {
     assembledMessages.push(
       { role: 'user', content: `[Previous conversation context]: ${params.rollingSummary}` },
@@ -45,7 +52,8 @@ export function assembleContext(params: AssembleParams): AssembledContext {
     );
   }
 
-  // Add recent messages (respecting token budget)
+  // Add recent messages (already limited to ~5 by route.ts)
+  // trimToTokenBudget is a safety net for very long individual messages
   const recentMessages = trimToTokenBudget(params.messages, budget.history);
   assembledMessages.push(...recentMessages);
 
@@ -88,14 +96,14 @@ function buildSystemPrompt(
     }
   }
 
-  // RAG context
+  // RAG context — the key source for older conversation information
   if (ragContext) {
     const trimmedRAG = ragContext.slice(0, ragBudget * 4); // approx chars
     parts.push(
-      '\n--- RELEVANT MEMORIES ---',
+      '\n--- RETRIEVED CONTEXT (from memory & past messages) ---',
       trimmedRAG,
-      '--- END MEMORIES ---',
-      'Use these memories to personalize your response when relevant, but do not mention that you have access to memories.'
+      '--- END CONTEXT ---',
+      'Use this context naturally when relevant. Do not mention that you retrieved it from memory.'
     );
   }
 

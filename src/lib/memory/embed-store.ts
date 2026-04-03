@@ -18,7 +18,7 @@ export async function storeMessageEmbedding(
   role: 'user' | 'assistant'
 ): Promise<void> {
   // Skip very short messages (greetings etc.) — not useful for RAG
-  if (content.trim().length < 20) return;
+  if (content.trim().length < 10) return;
 
   const supabase = createServiceClient();
   const embedding = await generateEmbedding(content);

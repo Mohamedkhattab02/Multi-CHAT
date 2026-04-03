@@ -185,18 +185,27 @@ export async function POST(req: NextRequest) {
   }
 
   // ═══ LAYER 2: MEMORY RETRIEVAL (RAG) + Reranking ═══
+  // RAG is the primary way to access older conversation context.
+  // Since we only send the last 5 messages directly, RAG retrieves
+  // relevant older messages, facts, and summaries from embeddings.
   let ragContext = '';
   if (intent.needsRAG) {
     try {
-      ragContext = await retrieveMemories(user.id, message);
+      ragContext = await retrieveMemories(user.id, message, 8, conversationId || undefined);
     } catch (err) {
       Sentry.captureException(err, { tags: { action: 'rag_retrieval' } });
     }
   }
 
   // ═══ LAYER 3: CONTEXT ASSEMBLY ═══
+  // KEY DESIGN: Only send the last 5 messages as direct context.
+  // Older context is retrieved via RAG (Layer 2) when needed.
+  // This makes RAG actually useful and reduces token costs dramatically.
+  const RECENT_MESSAGE_LIMIT = 5;
+
   let conversation = null;
-  let history: Array<{ role: string; content: string }> = [];
+  let recentHistory: Array<{ role: string; content: string }> = [];
+  let totalMessageCount = 0;
 
   if (conversationId) {
     const { data: conv } = await supabase
@@ -205,13 +214,17 @@ export async function POST(req: NextRequest) {
       .eq('id', conversationId)
       .single();
     conversation = conv;
+    totalMessageCount = conv?.message_count || 0;
 
+    // Only fetch the last N messages — NOT the full history
     const { data: msgs } = await supabase
       .from('messages')
       .select('role, content, content_blocks')
       .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: true });
-    history = msgs || [];
+      .order('created_at', { ascending: false })
+      .limit(RECENT_MESSAGE_LIMIT);
+    // Reverse back to chronological order
+    recentHistory = (msgs || []).reverse();
 
     // Save user message to DB
     await supabase.from('messages').insert({
@@ -222,6 +235,12 @@ export async function POST(req: NextRequest) {
       attachments: attachments || [],
     });
 
+    // Update message count on conversation
+    await supabase
+      .from('conversations')
+      .update({ message_count: totalMessageCount + 1 })
+      .eq('id', conversationId);
+
     // Embed user message in background (for RAG retrieval)
     storeMessageEmbedding(user.id, message, conversationId, 'user')
       .catch((err) => Sentry.captureException(err, { tags: { action: 'embed_user_msg' } }));
@@ -231,7 +250,7 @@ export async function POST(req: NextRequest) {
     model: actualModel,
     userProfile,
     ragContext,
-    messages: [...history, { role: 'user', content: enrichedMessage }],
+    messages: [...recentHistory, { role: 'user', content: enrichedMessage }],
     rollingSummary: conversation?.summary,
     language: intent.language,
   });
@@ -354,11 +373,11 @@ export async function POST(req: NextRequest) {
               }
 
               // Rolling summary every 10 messages
-              const messageCount = (history?.length || 0) + 2;
+              const messageCount = totalMessageCount + 2;
               if (messageCount > 12 && messageCount % 10 === 0) {
                 generateRollingSummary(
                   conversation?.summary,
-                  history.slice(-10),
+                  recentHistory.slice(-5),
                   message,
                   event.fullText || ''
                 )
@@ -372,13 +391,13 @@ export async function POST(req: NextRequest) {
               }
 
               // Extract memories every 5 messages (fire and forget)
-              if (messageCount % 5 === 0 && event.fullText) {
+              if (messageCount > 0 && messageCount % 5 === 0 && event.fullText) {
                 extractMemories(user.id, message, event.fullText)
                   .catch((err) => Sentry.captureException(err, { tags: { action: 'extract_memories' } }));
               }
 
               // Auto-generate title for new conversations + update model
-              if (history.length === 0) {
+              if (totalMessageCount === 0) {
                 generateTitle(message, event.fullText || '')
                   .then(async (title) => {
                     await supabase
