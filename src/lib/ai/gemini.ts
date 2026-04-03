@@ -96,10 +96,19 @@ export async function* streamGemini(params: StreamGeminiParams): AsyncGenerator<
 }
 
 function convertToGeminiHistory(messages: Array<{ role: string; content: string }>) {
-  return messages
-    .filter((m) => m.role !== 'system')
-    .map((m) => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }],
-    }));
+  const filtered = messages.filter((m) => m.role !== 'system');
+
+  // Gemini requires strictly alternating user/model turns.
+  // Merge consecutive same-role messages to avoid API errors.
+  const merged: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+  for (const m of filtered) {
+    const geminiRole = m.role === 'assistant' ? 'model' : 'user';
+    const last = merged[merged.length - 1];
+    if (last && last.role === geminiRole) {
+      last.parts[0].text += '\n\n' + m.content;
+    } else {
+      merged.push({ role: geminiRole, parts: [{ text: m.content }] });
+    }
+  }
+  return merged;
 }

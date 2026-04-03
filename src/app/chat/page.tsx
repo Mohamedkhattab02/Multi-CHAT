@@ -67,8 +67,10 @@ export default function NewChatPage() {
         const serializedAttachments = await Promise.all(
           attachments.map(async (att) => {
             let data: string | undefined;
-            if (att.type.startsWith('image/')) {
+            if (att.type.startsWith('image/') || att.type === 'application/pdf') {
               data = await fileToBase64(att.file);
+            } else if (att.type.startsWith('text/')) {
+              data = btoa(await att.file.text());
             }
             return { type: att.type, name: att.name, size: att.size, data };
           })

@@ -20,6 +20,13 @@ import { extractMemories } from '@/lib/memory/extract-memories';
 import { ChatMessageSchema } from '@/lib/security/validate';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
+import pdfParse from 'pdf-parse-new';
+
+async function extractPdfText(base64Data: string): Promise<string> {
+  const buffer = Buffer.from(base64Data, 'base64');
+  const result = await pdfParse(buffer);
+  return result.text.slice(0, 8000);
+}
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -32,15 +39,25 @@ export async function POST(req: NextRequest) {
     body = ChatMessageSchema.parse(raw);
   } catch (error) {
     if (error instanceof z.ZodError) {
+      console.error('[Zod Validation]', JSON.stringify(error.issues, null, 2));
       return new Response(
         JSON.stringify({ error: 'Invalid input', details: error.issues }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
+    console.error('[Chat API] Parse error:', error);
     return new Response('Bad request', { status: 400 });
   }
 
-  const { message, conversationId, model, attachments } = body;
+  const { conversationId, model, attachments } = body;
+  // If user sends only attachments with no text, provide a default prompt
+  const message = body.message || (attachments?.length ? 'Analyze the attached file' : '');
+  if (!message && !attachments?.length) {
+    return new Response(
+      JSON.stringify({ error: 'Message or attachment required' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
   const supabase = await createClient();
 
   // Get authenticated user
@@ -76,7 +93,39 @@ export async function POST(req: NextRequest) {
   const hasImageAttachment = attachments?.some((a) =>
     a.type?.startsWith('image')
   );
-  const intent = await classifyIntent(message, hasImageAttachment);
+
+  // Extract text content from PDF/text attachments and append to message
+  let enrichedMessage = message;
+  if (attachments?.length) {
+    const textParts: string[] = [];
+    for (const att of attachments) {
+      if (!att.data) continue;
+      if (att.type === 'application/pdf') {
+        // Decode base64 PDF and extract text
+        try {
+          const pdfText = await extractPdfText(att.data);
+          if (pdfText.trim()) {
+            textParts.push(`[Attached PDF: ${att.name}]\n${pdfText}`);
+          }
+        } catch (err) {
+          Sentry.captureException(err, { tags: { action: 'pdf_extract' } });
+          textParts.push(`[Attached PDF: ${att.name} — could not extract text]`);
+        }
+      } else if (att.type.startsWith('text/')) {
+        try {
+          const textContent = Buffer.from(att.data, 'base64').toString('utf-8');
+          textParts.push(`[Attached file: ${att.name}]\n${textContent}`);
+        } catch {
+          textParts.push(`[Attached file: ${att.name} — could not read]`);
+        }
+      }
+    }
+    if (textParts.length) {
+      enrichedMessage = `${message}\n\n---\n${textParts.join('\n\n')}`;
+    }
+  }
+
+  const intent = await classifyIntent(enrichedMessage, hasImageAttachment);
 
   // ═══ SPECIAL ROUTE: Image Generation ═══
   if (intent.needsImageGeneration) {
@@ -182,7 +231,7 @@ export async function POST(req: NextRequest) {
     model: actualModel,
     userProfile,
     ragContext,
-    messages: [...history, { role: 'user', content: message }],
+    messages: [...history, { role: 'user', content: enrichedMessage }],
     rollingSummary: conversation?.summary,
     language: intent.language,
   });
@@ -263,6 +312,7 @@ export async function POST(req: NextRequest) {
               )
             );
           } else if (event.type === 'error') {
+            console.error('[Model Error]', event.text);
             controller.enqueue(
               encoder.encode(
                 `data: ${JSON.stringify({ error: event.text })}\n\n`
@@ -354,6 +404,7 @@ export async function POST(req: NextRequest) {
 
         clearInterval(heartbeatInterval);
       } catch (error) {
+        console.error('[Chat Stream Error]', error instanceof Error ? error.stack : error);
         Sentry.captureException(error, {
           tags: { model: actualModel, action: 'stream' },
           extra: { conversationId, messageLength: message.length },

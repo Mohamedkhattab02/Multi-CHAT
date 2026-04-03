@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 export const ChatMessageSchema = z.object({
   conversationId: z.string().uuid().optional(),
-  message: z.string().min(1).max(50000),
+  message: z.string().min(0).max(50000),
   model: z.enum(['gpt-5.1', 'gpt-5-mini', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-3.1-flash-image', 'glm-4.7', 'glm-4.6']),
   attachments: z
     .array(
