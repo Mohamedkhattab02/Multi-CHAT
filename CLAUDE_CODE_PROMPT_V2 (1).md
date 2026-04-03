@@ -639,7 +639,7 @@ async function generateOpenAIEmbedding(text: string): Promise<number[]> {
 ### Voyage AI Reranker (lib/ai/reranker.ts)
 
 ```typescript
-// MANDATORY reranking — Voyage AI rerank-3
+// MANDATORY reranking — Voyage AI rerank-2.5
 // Applied after hybrid search, before context injection
 // Improves RAG accuracy by 30-40%
 

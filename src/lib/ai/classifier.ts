@@ -4,7 +4,7 @@
 // Uses Gemini 2.5 Flash for classification (fast + cheap)
 // ============================================================
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { z } from 'zod';
 import * as Sentry from '@sentry/nextjs';
 
@@ -143,14 +143,31 @@ export async function classifyIntent(
     };
   }
 
-  // Full LLM classification using Gemini 2.5 Flash
+  // Full LLM classification using Gemini 2.5 Flash with JSON mode
   try {
     const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY!);
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.5-flash',
       generationConfig: {
-        maxOutputTokens: 300,
+        maxOutputTokens: 1024,
         temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: SchemaType.OBJECT,
+          properties: {
+            intent: { type: SchemaType.STRING, format: 'enum', enum: ['question', 'code', 'analysis', 'chitchat', 'creative', 'command', 'image_gen', 'web_search'] },
+            complexity: { type: SchemaType.STRING, format: 'enum', enum: ['low', 'medium', 'high'] },
+            needsRAG: { type: SchemaType.BOOLEAN },
+            needsInternet: { type: SchemaType.BOOLEAN },
+            hasImageInput: { type: SchemaType.BOOLEAN },
+            needsImageGeneration: { type: SchemaType.BOOLEAN },
+            routeOverride: { type: SchemaType.STRING, format: 'enum', enum: ['gemini-3-flash', 'gemini-3.1-flash-image', 'none'] },
+            suggestedModel: { type: SchemaType.STRING },
+            language: { type: SchemaType.STRING },
+            mainTopic: { type: SchemaType.STRING },
+          },
+          required: ['intent', 'complexity', 'needsRAG', 'needsInternet', 'hasImageInput', 'needsImageGeneration', 'routeOverride', 'suggestedModel', 'language', 'mainTopic'],
+        },
       },
     });
 
@@ -161,29 +178,17 @@ export async function classifyIntent(
           parts: [{
             text: `You are a multilingual query classifier. The user message can be in ANY language (English, Hebrew, Arabic, etc.). The language does NOT affect complexity — classify based on the MEANING, not the language.
 
-Return ONLY valid JSON, no markdown, no explanation.
-
-{"intent":"question|code|analysis|chitchat|creative|command|image_gen|web_search",
-"complexity":"low|medium|high",
-"needsRAG":true|false,
-"needsInternet":true|false,
-"hasImageInput":false,
-"needsImageGeneration":true|false,
-"routeOverride":"gemini-3-flash|gemini-3.1-flash-image|none",
-"suggestedModel":"auto",
-"language":"en|he|ar|auto",
-"mainTopic":"brief topic"}
-
 COMPLEXITY RULES (apply equally to ALL languages):
 - low: greetings (hi, שלום, مرحبا), chitchat (מה נשמע, how are you, كيف حالك), simple factual questions, short translations, simple math, yes/no questions, small talk
 - medium: explanations, summaries, moderate code questions, creative writing
-- high: complex code generation/debugging, deep analysis, multi-step reasoning, research, architecture design
+- high: ONLY for complex code generation/debugging, deep multi-step analysis, research papers, architecture design — must be genuinely difficult
 
 EXAMPLES:
 - "שלום מה שלומך" → complexity:low, intent:chitchat
 - "מה זה פייתון" → complexity:low, intent:question
 - "תסביר לי מה זה API" → complexity:medium, intent:question
-- "כתוב לי פונקציה שממיינת מערך" → complexity:high, intent:code
+- "כתוב לי פונקציה שממיינת מערך" → complexity:medium, intent:code
+- "כתוב לי מערכת אימות מלאה עם JWT" → complexity:high, intent:code
 - "hi" → complexity:low, intent:chitchat
 - "explain quantum computing" → complexity:medium, intent:question
 
@@ -191,7 +196,8 @@ ROUTING RULES:
 - If query needs real-time data, current info, or internet → routeOverride:"gemini-3-flash", needsInternet:true
 - If query asks to generate/create/draw an image → routeOverride:"gemini-3.1-flash-image", needsImageGeneration:true
 - chitchat/greetings → needsRAG:false, complexity:low
-- Code/analysis → needsRAG:true, complexity:high
+- Simple code (single function, short snippet) → needsRAG:false, complexity:medium
+- Complex code (full system, debugging, architecture) → needsRAG:true, complexity:high
 - Simple factual → needsRAG:false, complexity:low
 - Explanations → needsRAG:true, complexity:medium or high depending on depth
 
@@ -203,9 +209,13 @@ User message: ${message}`,
 
     const text = result.response.text();
 
-    // Extract JSON from response (handle markdown code blocks)
+    // With responseMimeType: 'application/json', Gemini returns clean JSON
+    // But still extract from possible markdown wrapping as safety net
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON in classifier response');
+    if (!jsonMatch) {
+      console.warn('[Classifier] No JSON found in response, raw text:', text.slice(0, 500));
+      return FALLBACK;
+    }
 
     const parsed = JSON.parse(jsonMatch[0]);
     return ClassificationSchema.parse(parsed);

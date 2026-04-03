@@ -113,3 +113,26 @@ useStreaming hook → POST /api/chat
     ↓
 SSE events → useStreaming → MessageList (virtual) → MessageBubble (markdown)
 ```
+
+
+## phase 3
+משימה 2: בדיקת Phase 3 (Memory System)
+הנה הסטטוס לפי כל שלב:
+
+#	שלב	סטטוס	הערות
+24	Voyage AI embedding (+ OpenAI fallback)	קיים	embeddings.ts — Voyage primary, OpenAI fallback, 1024 dims
+25	Voyage AI Reranker	קיים	reranker.ts — rerank-3, graceful fallback
+26	Supabase Edge Function (auto-embedding webhook)	חסר	אין תיקיית supabase/functions/. ה-embed-store קיים כקוד server-side ב-embed-store.ts אבל לא כ-Edge Function שמופעל ע"י Database Webhook
+27	hybrid_search RPC	קיים ב-SQL	ב-001_initial_schema.sql — הפונקציה מוגדרת עם RRF scoring
+28	Intent classifier	קיים (תוקן עכשיו)	classifier.ts — עם JSON mode
+29	Context assembler + token budgeting	קיים	context-assembler.ts — עם TOKEN_BUDGETS per model
+30	RAG pipeline (search → rerank → format)	קיים	rag-pipeline.ts — hybrid search → Voyage rerank → format
+31	Rolling summary	קיים	rolling-summary.ts — עם Gemini 2.0 Flash
+32	extract-memories Edge Function	חסר	לא נוצר. הספק דורש supabase/functions/extract-memories/index.ts (Deno Edge Function)
+33	Test full pipeline	לא נבדק	—
+מה חסר ב-Phase 3:
+supabase/functions/extract-memories/index.ts — Edge Function שמחלץ facts/preferences מהשיחה ושומר בטבלת memories. לפי הספק, צריך להיקרא כל 5 הודעות.
+
+supabase/functions/embed/index.ts — Edge Function שנקרא ע"י Database Webhook כשנוצרת הודעה חדשה. נכון לעכשיו, ה-embedding נעשה ב-server-side (embed-store.ts) שזה עובד, אבל הארכיטקטורה המקורית רצתה webhook-triggered Edge Function.
+
+רוצה שאצור את ה-Edge Functions החסרים?

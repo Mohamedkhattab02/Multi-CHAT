@@ -16,6 +16,7 @@ import { streamGLM } from '@/lib/ai/glm';
 import { generateImage } from '@/lib/ai/gemini-image';
 import { generateRollingSummary, generateTitle } from '@/lib/memory/rolling-summary';
 import { storeMessageEmbedding } from '@/lib/memory/embed-store';
+import { extractMemories } from '@/lib/memory/extract-memories';
 import { ChatMessageSchema } from '@/lib/security/validate';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
@@ -318,6 +319,12 @@ export async function POST(req: NextRequest) {
                       .eq('id', conversationId);
                   })
                   .catch((err) => Sentry.captureException(err));
+              }
+
+              // Extract memories every 5 messages (fire and forget)
+              if (messageCount % 5 === 0 && event.fullText) {
+                extractMemories(user.id, message, event.fullText)
+                  .catch((err) => Sentry.captureException(err, { tags: { action: 'extract_memories' } }));
               }
 
               // Auto-generate title for new conversations + update model
