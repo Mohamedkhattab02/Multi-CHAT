@@ -1,19 +1,27 @@
 // ============================================================
-// Extract Memories — Layer 5 of 7-layer memory system
+// Extract Memories — V4
 // Extracts user facts/preferences/goals from conversation
-// Uses Gemini 2.0 Flash (fast + cheap) for extraction
-// Runs every 5 messages (called from route.ts)
+// V4: Semantic dedup check before insert, extended types,
+//     anti-memory awareness
 // ============================================================
 
 import { createServiceClient } from '@/lib/supabase/server';
+import { generateEmbedding } from '@/lib/ai/embeddings';
+import { storeMemoryEmbedding } from '@/lib/memory/embed-store';
 import * as Sentry from '@sentry/nextjs';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
+const VALID_TYPES = [
+  'fact', 'preference', 'goal', 'skill', 'opinion',
+  'rejection', 'correction', 'constraint',
+] as const;
+
 export async function extractMemories(
   userId: string,
   message: string,
-  response: string
+  response: string,
+  conversationId?: string
 ): Promise<void> {
   try {
     const geminiResponse = await fetch(GEMINI_API_BASE, {
@@ -26,17 +34,23 @@ export async function extractMemories(
         contents: [{
           role: 'user',
           parts: [{
-            text: `Extract facts about the user from this conversation. Return ONLY a valid JSON array, no markdown, no explanation.
+            text: `Extract facts about the user from this conversation. Return ONLY a valid JSON array, no markdown.
 
-Each item: {"type":"fact|preference|goal|skill|opinion","content":"...","confidence":0.0-1.0}
+Each item: {"type":"fact|preference|goal|skill|opinion|rejection|correction|constraint","content":"...","confidence":0.0-1.0}
+
+Types:
+- "fact": personal info (name, job, location)
+- "preference": things user likes/dislikes
+- "goal": things user wants to achieve
+- "skill": things user knows or is learning
+- "opinion": views expressed
+- "rejection": user explicitly rejected an approach/solution
+- "correction": user corrected a mistake
+- "constraint": user stated a requirement/limitation
 
 Rules:
 - Only extract clearly stated personal information
-- "fact": things about the user (name, job, location, etc.)
-- "preference": things the user likes/dislikes
-- "goal": things the user wants to achieve
-- "skill": things the user knows or is learning
-- "opinion": views the user expressed
+- If user rejected/corrected something, capture WHAT was rejected and WHY
 - Return [] if nothing clearly extractable
 
 User: "${message.slice(0, 1000)}"
@@ -69,19 +83,66 @@ Assistant: "${response.slice(0, 500)}"`,
 
     if (memories.length === 0) return;
 
-    const validTypes = ['fact', 'preference', 'goal', 'skill', 'opinion'];
-    const rows = memories
-      .filter((m: { content?: string }) => m.content && typeof m.content === 'string')
-      .map((m: { type?: string; content?: string; confidence?: number }) => ({
-        user_id: userId,
-        type: validTypes.includes(m.type || '') ? m.type : 'fact',
-        content: String(m.content).slice(0, 500),
-        confidence: Math.min(Math.max(Number(m.confidence) || 0.5, 0), 1),
-      }));
+    const supabase = createServiceClient();
 
-    if (rows.length > 0) {
-      const supabase = createServiceClient();
-      await supabase.from('memories').insert(rows);
+    for (const m of memories) {
+      if (!m.content || typeof m.content !== 'string') continue;
+
+      const type = VALID_TYPES.includes(m.type) ? m.type : 'fact';
+      const content = String(m.content).slice(0, 500);
+      const confidence = Math.min(Math.max(Number(m.confidence) || 0.5, 0), 1);
+
+      // ═══ V4: Semantic dedup check ═══
+      // Check if a similar memory already exists (threshold 0.92)
+      try {
+        const embedding = await generateEmbedding(content);
+        const { data: similar } = await supabase.rpc('find_similar_memory', {
+          target_user_id: userId,
+          query_embedding: embedding,
+          similarity_threshold: 0.92,
+        });
+
+        if (similar && similar.length > 0) {
+          // Update existing memory's confidence if higher
+          const existing = similar[0];
+          if (confidence > existing.confidence) {
+            await supabase
+              .from('memories')
+              .update({ confidence, content })
+              .eq('id', existing.id);
+          }
+          continue; // Skip inserting duplicate
+        }
+
+        // Insert new memory
+        const { data: inserted } = await supabase.from('memories').insert({
+          user_id: userId,
+          type,
+          content,
+          confidence,
+          source_conversation_id: conversationId || null,
+        }).select('id').single();
+
+        // Embed the memory for future dedup and RAG
+        if (inserted) {
+          await storeMemoryEmbedding(
+            userId,
+            inserted.id,
+            content,
+            conversationId || '',
+            type === 'rejection' || type === 'correction' ? 'anti_memory' : 'fact'
+          );
+        }
+      } catch (dupError) {
+        // If dedup check fails, still insert (better to have duplicates than lose memories)
+        await supabase.from('memories').insert({
+          user_id: userId,
+          type,
+          content,
+          confidence,
+          source_conversation_id: conversationId || null,
+        });
+      }
     }
   } catch (error) {
     Sentry.captureException(error, {

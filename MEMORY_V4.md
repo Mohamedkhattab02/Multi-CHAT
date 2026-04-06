@@ -1343,131 +1343,908 @@ function finalizeChunk(blocks: StructuralBlock[]): Chunk {
 
 ## 11. Database Schema Changes
 
-All changes in one migration: `supabase/migrations/002_memory_v4.sql`
+-- ============================================================
+-- MULTICHAT AI — V4 COMPLETE FRESH INSTALL
+-- Supabase SQL Editor compatible (fresh/empty database)
+-- Run this entire file in one go via Supabase Dashboard > SQL Editor
+-- ============================================================
 
-```sql
--- ═══════════════════════════════════════
--- V4 MEMORY SYSTEM MIGRATION
--- ═══════════════════════════════════════
 
--- 1. Embeddings: add is_active flag for invalidation
-ALTER TABLE embeddings 
-  ADD COLUMN IF NOT EXISTS is_active boolean DEFAULT true,
-  ADD COLUMN IF NOT EXISTS invalidated_at timestamptz;
+-- ============================================================
+-- EXTENSIONS
+-- ============================================================
+create extension if not exists vector;
+create extension if not exists pg_trgm;
 
-CREATE INDEX IF NOT EXISTS idx_embeddings_active 
-  ON embeddings (user_id, is_active) 
-  WHERE is_active = true;
 
--- 2. Conversations: working memory, document registry, fingerprint, summary structure
-ALTER TABLE conversations 
-  ADD COLUMN IF NOT EXISTS working_memory jsonb DEFAULT '{
-    "task": null,
-    "phase": "none",
-    "active_files": [],
-    "open_questions": [],
-    "decisions": []
+-- ============================================================
+-- TABLES
+-- ============================================================
+
+-- 1. USER PROFILES
+create table public.users (
+  id uuid references auth.users(id) on delete cascade primary key,
+  email text,
+  name text,
+  avatar_url text,
+  language text default 'auto',
+  expertise text default 'general',
+  preferred_model text default 'gemini-3.1-pro',
+  preferences jsonb default '{}'::jsonb,
+  daily_message_limit int default 100,
+  messages_today int default 0,
+  last_reset_date date default current_date,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+-- 2. FOLDERS (created before conversations so FK can reference it)
+create table public.folders (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references public.users(id) on delete cascade not null,
+  name text not null,
+  icon text default 'folder',
+  sort_order int default 0,
+  created_at timestamptz default now()
+);
+
+-- 3. CONVERSATIONS (V4: working memory, document registry, fingerprint)
+create table public.conversations (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references public.users(id) on delete cascade not null,
+  title text default 'New conversation',
+  model text not null default 'GPT 5.1',
+  summary text,
+  system_prompt text,
+  topic text,
+  message_count int default 0,
+  is_pinned boolean default false,
+  share_token text unique,
+  is_public boolean default false,
+  folder_id uuid references public.folders(id) on delete set null,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+
+  -- V4 columns
+  working_memory jsonb default '{
+    "current_task": null,
+    "sub_tasks": [],
+    "active_entities": [],
+    "last_decision": null,
+    "phase": "idle",
+    "updated_at": null
   }'::jsonb,
-  ADD COLUMN IF NOT EXISTS document_registry jsonb DEFAULT '[]'::jsonb,
-  ADD COLUMN IF NOT EXISTS fingerprint vector(256),
-  ADD COLUMN IF NOT EXISTS structured_summary jsonb,
-  ADD COLUMN IF NOT EXISTS gemini_cache_name text;
+  document_registry jsonb default '[]'::jsonb,
+  fingerprint vector(256),
+  structured_summary jsonb,
+  gemini_cache_name text,
+  key_entities text[] default '{}',
+  key_topics text[] default '{}'
+);
 
-CREATE INDEX IF NOT EXISTS idx_conversations_fingerprint 
-  ON conversations USING hnsw (fingerprint vector_cosine_ops);
+-- 4. MESSAGES
+create table public.messages (
+  id uuid default gen_random_uuid() primary key,
+  conversation_id uuid references public.conversations(id) on delete cascade not null,
+  role text not null check (role in ('user', 'assistant', 'system')),
+  content text not null,
+  content_blocks jsonb,
+  model text,
+  token_count int,
+  attachments jsonb default '[]'::jsonb,
+  created_at timestamptz default now()
+);
 
--- 3. Memories: allow anti_memory type
-ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_type_check;
-ALTER TABLE memories ADD CONSTRAINT memories_type_check 
-  CHECK (type IN ('fact', 'preference', 'goal', 'skill', 'opinion', 'anti_memory'));
+-- 5. MEMORIES (V4: extended types + invalidation tracking)
+create table public.memories (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references public.users(id) on delete cascade not null,
+  type text not null check (type in (
+    'fact', 'preference', 'goal', 'skill', 'opinion',
+    'rejection', 'correction', 'constraint', 'anti_memory'
+  )),
+  content text not null,
+  confidence float default 0.8,
+  source_conversation_id uuid references public.conversations(id) on delete set null,
+  created_at timestamptz default now(),
 
-ALTER TABLE memories 
-  ADD COLUMN IF NOT EXISTS is_active boolean DEFAULT true;
+  -- V4 columns
+  is_active boolean default true,
+  valid_until timestamptz,
+  invalidated_by uuid references public.memories(id) on delete set null
+);
 
--- 4. Hybrid search v4 function
-CREATE OR REPLACE FUNCTION hybrid_search_v4(
+-- 6. EMBEDDINGS (V4: extended source types)
+create table public.embeddings (
+  id bigserial primary key,
+  user_id uuid references public.users(id) on delete cascade not null,
+  source_type text not null check (source_type in (
+    'message', 'fact', 'document', 'summary', 'anti_memory'
+  )),
+  source_id uuid,
+  content text not null,
+  embedding vector(1024) not null,
+  fts tsvector generated always as (
+    to_tsvector('english', content)
+  ) stored,
+  metadata jsonb default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+-- 7. USER ENTITIES (knowledge graph — reserved for future)
+create table public.user_entities (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references public.users(id) on delete cascade not null,
+  entity_name text not null,
+  entity_type text not null,
+  properties jsonb default '{}'::jsonb,
+  created_at timestamptz default now(),
+  unique(user_id, entity_name, entity_type)
+);
+
+create table public.user_entity_relations (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references public.users(id) on delete cascade not null,
+  from_entity_id uuid references public.user_entities(id) on delete cascade,
+  to_entity_id uuid references public.user_entities(id) on delete cascade,
+  relation_type text not null,
+  created_at timestamptz default now()
+);
+
+-- 8. USAGE LOGS
+create table public.usage_logs (
+  id bigserial primary key,
+  user_id uuid references public.users(id) on delete cascade not null,
+  model text not null,
+  input_tokens int default 0,
+  output_tokens int default 0,
+  cost_usd numeric(10, 6) default 0,
+  endpoint text not null,
+  created_at timestamptz default now()
+);
+
+
+-- ============================================================
+-- INDEXES
+-- ============================================================
+
+-- Embeddings: core RAG indexes
+create index idx_embeddings_hnsw on embeddings
+  using hnsw (embedding vector_cosine_ops);
+create index idx_embeddings_fts on embeddings
+  using gin (fts);
+create index idx_embeddings_trgm on embeddings
+  using gin (content gin_trgm_ops);
+create index idx_embeddings_user on embeddings
+  (user_id, created_at desc);
+create index idx_embeddings_meta on embeddings
+  using gin (metadata);
+create index idx_embeddings_source on embeddings
+  (source_type, source_id)
+  where source_id is not null;
+
+-- Messages
+create index idx_messages_conv on messages
+  (conversation_id, created_at asc);
+create index idx_messages_has_attachments on messages
+  (conversation_id, created_at asc)
+  where jsonb_array_length(attachments) > 0;
+
+-- Conversations
+create index idx_conversations_user on conversations
+  (user_id, updated_at desc);
+create index idx_conversations_folder on conversations
+  (folder_id);
+create index idx_conversations_share on conversations
+  (share_token)
+  where share_token is not null;
+create index idx_conversations_fingerprint on conversations
+  using hnsw (fingerprint vector_cosine_ops);
+create index idx_conversations_topics on conversations
+  using gin (key_topics);
+
+-- Memories
+create index idx_memories_user on memories
+  (user_id, type);
+create index idx_memories_active on memories
+  (user_id, is_active)
+  where is_active = true;
+create index idx_memories_user_created on memories
+  (user_id, created_at desc);
+
+-- Usage
+create index idx_usage_user_date on usage_logs
+  (user_id, created_at desc);
+
+
+-- ============================================================
+-- ROW LEVEL SECURITY
+-- ============================================================
+
+alter table public.users enable row level security;
+alter table public.conversations enable row level security;
+alter table public.messages enable row level security;
+alter table public.memories enable row level security;
+alter table public.embeddings enable row level security;
+alter table public.folders enable row level security;
+alter table public.user_entities enable row level security;
+alter table public.user_entity_relations enable row level security;
+alter table public.usage_logs enable row level security;
+
+-- Users
+create policy "Users read own profile"
+  on users for select
+  using (auth.uid() = id);
+
+create policy "Users insert own profile"
+  on users for insert
+  with check (auth.uid() = id);
+
+create policy "Users update own profile"
+  on users for update
+  using (auth.uid() = id);
+
+-- Conversations
+create policy "Users manage own conversations"
+  on conversations for all
+  using (auth.uid() = user_id);
+
+create policy "Anyone can read shared conversations"
+  on conversations for select
+  using (is_public = true and share_token is not null);
+
+-- Messages
+create policy "Users manage own messages"
+  on messages for all
+  using (
+    auth.uid() = (
+      select user_id from conversations
+      where id = messages.conversation_id
+    )
+  );
+
+create policy "Anyone can read shared messages"
+  on messages for select
+  using (
+    exists (
+      select 1 from conversations
+      where id = messages.conversation_id
+        and is_public = true
+    )
+  );
+
+-- Memories
+create policy "Users manage own memories"
+  on memories for all
+  using (auth.uid() = user_id);
+
+-- Embeddings
+create policy "Users manage own embeddings"
+  on embeddings for all
+  using (auth.uid() = user_id);
+
+-- Folders
+create policy "Users manage own folders"
+  on folders for all
+  using (auth.uid() = user_id);
+
+-- User entities
+create policy "Users manage own entities"
+  on user_entities for all
+  using (auth.uid() = user_id);
+
+create policy "Users manage own relations"
+  on user_entity_relations for all
+  using (auth.uid() = user_id);
+
+-- Usage logs
+create policy "Users read own usage"
+  on usage_logs for select
+  using (auth.uid() = user_id);
+
+create policy "Users insert own usage"
+  on usage_logs for insert
+  with check (auth.uid() = user_id);
+
+
+-- ============================================================
+-- FUNCTIONS
+-- ============================================================
+
+-- Auto-create user profile on signup
+create or replace function public.handle_new_user()
+returns trigger as $$
+begin
+  insert into public.users (id, email, name, avatar_url)
+  values (
+    new.id,
+    new.email,
+    coalesce(
+      new.raw_user_meta_data->>'full_name',
+      new.raw_user_meta_data->>'name',
+      split_part(new.email, '@', 1)
+    ),
+    new.raw_user_meta_data->>'avatar_url'
+  );
+  return new;
+end;
+$$ language plpgsql security definer;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute procedure public.handle_new_user();
+
+
+-- Increment message count on insert
+create or replace function public.auto_update_conversation()
+returns trigger as $$
+begin
+  update conversations
+  set message_count = message_count + 1,
+      updated_at = now()
+  where id = new.conversation_id;
+  return new;
+end;
+$$ language plpgsql security definer;
+
+drop trigger if exists on_message_insert on messages;
+create trigger on_message_insert
+  after insert on messages
+  for each row execute procedure public.auto_update_conversation();
+
+
+-- Decrement message count on delete
+create or replace function public.decrement_conversation_count()
+returns trigger as $$
+begin
+  update public.conversations
+  set message_count = greatest(message_count - 1, 0),
+      updated_at = now()
+  where id = old.conversation_id;
+  return old;
+end;
+$$ language plpgsql security definer;
+
+drop trigger if exists on_message_delete_update_count on messages;
+create trigger on_message_delete_update_count
+  after delete on messages
+  for each row execute procedure public.decrement_conversation_count();
+
+
+-- Delete orphaned embeddings when a message is deleted
+create or replace function public.delete_orphaned_embeddings()
+returns trigger
+language plpgsql security definer as $$
+begin
+  delete from public.embeddings
+  where source_id = old.id
+    and source_type = 'message';
+  return old;
+end;
+$$;
+
+drop trigger if exists on_message_delete_cleanup_embeddings on messages;
+create trigger on_message_delete_cleanup_embeddings
+  after delete on messages
+  for each row execute procedure public.delete_orphaned_embeddings();
+
+
+-- Delete related data when a conversation is deleted
+create or replace function public.delete_conversation_data()
+returns trigger
+language plpgsql security definer as $$
+begin
+  -- Delete embeddings linked to this conversation via metadata
+  delete from public.embeddings
+  where user_id = old.user_id
+    and (metadata->>'conversation_id') = old.id::text;
+
+  -- Delete memories sourced from this conversation
+  delete from public.memories
+  where source_conversation_id = old.id;
+
+  return old;
+end;
+$$;
+
+drop trigger if exists on_conversation_delete_cleanup on conversations;
+create trigger on_conversation_delete_cleanup
+  before delete on conversations
+  for each row execute procedure public.delete_conversation_data();
+
+
+-- Daily message limit reset
+create or replace function public.reset_daily_message_counts()
+returns void as $$
+begin
+  update users
+  set messages_today = 0,
+      last_reset_date = current_date
+  where last_reset_date < current_date;
+end;
+$$ language plpgsql security definer;
+
+
+-- ============================================================
+-- V4 RAG FUNCTIONS
+-- ============================================================
+
+-- Drop old function signatures first (return type changed from V1)
+drop function if exists public.hybrid_search(text, vector, uuid, int, float, float, float, int);
+drop function if exists public.hybrid_search_scoped(text, vector, uuid, uuid[], int, float, float, float, int);
+drop function if exists public.find_similar_memory(uuid, vector, float);
+drop function if exists public.search_similar_conversations(vector, uuid, int);
+drop function if exists public.cleanup_memories_v4(uuid);
+drop function if exists public.get_user_memory_stats(uuid);
+drop function if exists public.get_conversation_embedding_stats(uuid);
+
+-- Core Hybrid Search (V4)
+-- Filters: is_active via metadata, excludes current-turn pre-embeds
+-- Supports adaptive weights passed from the classifier
+create or replace function public.hybrid_search(
+  query_text text,
+  query_embedding vector(1024),
+  target_user_id uuid,
+  match_count int default 5,
+  full_text_weight float default 1.0,
+  semantic_weight float default 1.5,
+  fuzzy_weight float default 0.5,
+  rrf_k int default 50
+)
+returns table (
+  id bigint,
+  content text,
+  source_type text,
+  source_id uuid,
+  metadata jsonb,
+  created_at timestamptz,
+  score float
+)
+language sql stable
+as $$
+  with active_embeddings as (
+    select *
+    from embeddings e
+    where e.user_id = target_user_id
+      and coalesce((e.metadata->>'is_active')::boolean, true) = true
+      and coalesce((e.metadata->>'is_current_message')::boolean, false) = false
+  ),
+  full_text as (
+    select ae.id,
+      row_number() over (
+        order by ts_rank_cd(ae.fts, websearch_to_tsquery(query_text)) desc
+      ) as rank_ix
+    from active_embeddings ae
+    where ae.fts @@ websearch_to_tsquery(query_text)
+    limit least(match_count * 4, 30)
+  ),
+  semantic as (
+    select ae.id,
+      row_number() over (
+        order by ae.embedding <=> query_embedding
+      ) as rank_ix
+    from active_embeddings ae
+    order by ae.embedding <=> query_embedding
+    limit least(match_count * 4, 30)
+  ),
+  fuzzy as (
+    select ae.id,
+      row_number() over (
+        order by similarity(ae.content, query_text) desc
+      ) as rank_ix
+    from active_embeddings ae
+    where ae.content % query_text
+    limit least(match_count * 2, 15)
+  ),
+  combined as (
+    select
+      coalesce(ft.id, sem.id, fz.id) as eid,
+      (
+        coalesce(1.0 / (rrf_k + ft.rank_ix), 0.0) * full_text_weight +
+        coalesce(1.0 / (rrf_k + sem.rank_ix), 0.0) * semantic_weight +
+        coalesce(1.0 / (rrf_k + fz.rank_ix), 0.0) * fuzzy_weight
+      ) as combined_score
+    from full_text ft
+    full outer join semantic sem on ft.id = sem.id
+    full outer join fuzzy fz on coalesce(ft.id, sem.id) = fz.id
+  )
+  select
+    e.id,
+    e.content,
+    e.source_type,
+    e.source_id,
+    e.metadata,
+    e.created_at,
+    c.combined_score as score
+  from combined c
+  join embeddings e on c.eid = e.id
+  order by c.combined_score desc
+  limit match_count;
+$$;
+
+
+-- Conversation-scoped hybrid search (V4)
+-- Like hybrid_search but filters to specific conversation IDs
+-- Used after fingerprint pre-filtering narrows the search space
+create or replace function public.hybrid_search_scoped(
   query_text text,
   query_embedding vector(1024),
   target_user_id uuid,
   conversation_ids uuid[],
-  match_count int DEFAULT 24,
-  full_text_weight float DEFAULT 1.0,
-  semantic_weight float DEFAULT 1.5,
-  fuzzy_weight float DEFAULT 0.5,
-  rrf_k int DEFAULT 50
-) RETURNS TABLE (
-  id bigint, content text, source_type text, metadata jsonb,
-  is_active boolean, created_at timestamptz, score float
-) LANGUAGE sql STABLE AS $$
-  -- [see Section 6 for full body]
+  match_count int default 5,
+  full_text_weight float default 1.0,
+  semantic_weight float default 1.5,
+  fuzzy_weight float default 0.5,
+  rrf_k int default 50
+)
+returns table (
+  id bigint,
+  content text,
+  source_type text,
+  source_id uuid,
+  metadata jsonb,
+  created_at timestamptz,
+  score float
+)
+language sql stable
+as $$
+  with active_embeddings as (
+    select *
+    from embeddings e
+    where e.user_id = target_user_id
+      and coalesce((e.metadata->>'is_active')::boolean, true) = true
+      and coalesce((e.metadata->>'is_current_message')::boolean, false) = false
+      and (
+        -- Include if belongs to one of the fingerprint-selected conversations
+        (e.metadata->>'conversation_id')::uuid = any(conversation_ids)
+        -- Always include global memories (facts, anti_memory) regardless of conversation
+        or e.source_type in ('fact', 'summary', 'anti_memory')
+      )
+  ),
+  full_text as (
+    select ae.id,
+      row_number() over (
+        order by ts_rank_cd(ae.fts, websearch_to_tsquery(query_text)) desc
+      ) as rank_ix
+    from active_embeddings ae
+    where ae.fts @@ websearch_to_tsquery(query_text)
+    limit least(match_count * 4, 30)
+  ),
+  semantic as (
+    select ae.id,
+      row_number() over (
+        order by ae.embedding <=> query_embedding
+      ) as rank_ix
+    from active_embeddings ae
+    order by ae.embedding <=> query_embedding
+    limit least(match_count * 4, 30)
+  ),
+  fuzzy as (
+    select ae.id,
+      row_number() over (
+        order by similarity(ae.content, query_text) desc
+      ) as rank_ix
+    from active_embeddings ae
+    where ae.content % query_text
+    limit least(match_count * 2, 15)
+  ),
+  combined as (
+    select
+      coalesce(ft.id, sem.id, fz.id) as eid,
+      (
+        coalesce(1.0 / (rrf_k + ft.rank_ix), 0.0) * full_text_weight +
+        coalesce(1.0 / (rrf_k + sem.rank_ix), 0.0) * semantic_weight +
+        coalesce(1.0 / (rrf_k + fz.rank_ix), 0.0) * fuzzy_weight
+      ) as combined_score
+    from full_text ft
+    full outer join semantic sem on ft.id = sem.id
+    full outer join fuzzy fz on coalesce(ft.id, sem.id) = fz.id
+  )
+  select
+    e.id,
+    e.content,
+    e.source_type,
+    e.source_id,
+    e.metadata,
+    e.created_at,
+    c.combined_score as score
+  from combined c
+  join embeddings e on c.eid = e.id
+  order by c.combined_score desc
+  limit match_count;
 $$;
 
--- 5. Conversation fingerprint search
-CREATE OR REPLACE FUNCTION search_conversations_by_fingerprint(
-  target_user_id uuid,
-  query_fingerprint vector(256),
-  match_count int DEFAULT 10
-) RETURNS TABLE (id uuid, similarity float)
-LANGUAGE sql STABLE AS $$
-  SELECT id, 1 - (fingerprint <=> query_fingerprint) AS similarity
-  FROM conversations
-  WHERE user_id = target_user_id AND fingerprint IS NOT NULL
-  ORDER BY fingerprint <=> query_fingerprint
-  LIMIT match_count;
-$$;
 
--- 6. Memory cleanup (nightly via Edge Function scheduler)
-CREATE OR REPLACE FUNCTION cleanup_memories_v4(target_user_id uuid)
-RETURNS void AS $$
-BEGIN
-  -- Remove exact duplicates, keep newest
-  DELETE FROM memories a USING memories b
-  WHERE a.user_id = target_user_id AND b.user_id = target_user_id
-    AND a.content = b.content AND a.created_at < b.created_at;
-
-  -- Decay confidence
-  UPDATE memories SET confidence = GREATEST(confidence * 0.97, 0.1)
-  WHERE user_id = target_user_id AND created_at < now() - interval '30 days'
-    AND type != 'anti_memory';  -- anti-memories never decay
-
-  -- Delete very low confidence old memories
-  DELETE FROM memories
-  WHERE user_id = target_user_id AND confidence < 0.15
-    AND created_at < now() - interval '90 days' AND type != 'anti_memory';
-
-  -- Cap at 200 active memories per user (keep top by confidence)
-  DELETE FROM memories
-  WHERE user_id = target_user_id AND id NOT IN (
-    SELECT id FROM memories WHERE user_id = target_user_id
-    ORDER BY (CASE WHEN type = 'anti_memory' THEN 1 ELSE 0 END) DESC,
-             confidence DESC, created_at DESC
-    LIMIT 200
-  );
-
-  -- Purge embeddings permanently inactive > 90 days
-  DELETE FROM embeddings
-  WHERE user_id = target_user_id AND is_active = false
-    AND invalidated_at < now() - interval '90 days';
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- 7. Find similar memory (for dedup)
-CREATE OR REPLACE FUNCTION find_similar_memory(
+-- Semantic Duplicate Finder (for memory dedup)
+create or replace function public.find_similar_memory(
   target_user_id uuid,
   query_embedding vector(1024),
-  similarity_threshold float DEFAULT 0.92
-) RETURNS TABLE (id uuid, content text, confidence float, similarity float)
-LANGUAGE sql STABLE AS $$
-  SELECT m.id, m.content, m.confidence,
-         1 - (e.embedding <=> query_embedding) AS similarity
-  FROM memories m
-  JOIN embeddings e ON e.source_id = m.id AND e.source_type = 'fact'
-  WHERE m.user_id = target_user_id AND m.is_active = true
-    AND 1 - (e.embedding <=> query_embedding) >= similarity_threshold
-  ORDER BY similarity DESC
-  LIMIT 3;
+  similarity_threshold float default 0.92
+)
+returns table (
+  id uuid,
+  content text,
+  confidence float,
+  similarity float
+)
+language sql stable
+as $$
+  select
+    mem.id,
+    mem.content,
+    mem.confidence,
+    1 - (emb.embedding <=> query_embedding) as similarity
+  from public.memories mem
+  join public.embeddings emb
+    on emb.source_id = mem.id
+    and emb.source_type = 'fact'
+  where mem.user_id = target_user_id
+    and mem.is_active = true
+    and 1 - (emb.embedding <=> query_embedding) > similarity_threshold
+  order by similarity desc
+  limit 3;
 $$;
-```
+
+
+-- Conversation Fingerprint Search
+-- Uses 256-dim truncated vectors for fast coarse-grained filtering
+create or replace function public.search_similar_conversations(
+  query_embedding_256 vector(256),
+  target_user_id uuid,
+  match_count int default 3
+)
+returns table (
+  id uuid,
+  title text,
+  topic text,
+  similarity float,
+  message_count int
+)
+language sql stable
+as $$
+  select
+    c.id,
+    c.title,
+    c.topic,
+    1 - (c.fingerprint <=> query_embedding_256) as similarity,
+    c.message_count
+  from public.conversations c
+  where c.user_id = target_user_id
+    and c.fingerprint is not null
+  order by c.fingerprint <=> query_embedding_256
+  limit match_count;
+$$;
+
+
+-- Memory Cleanup (V4)
+-- Run nightly via Edge Function scheduler or Supabase cron
+create or replace function public.cleanup_memories_v4(target_user_id uuid)
+returns void as $$
+begin
+  -- 1. Remove exact text duplicates (keep the newest one)
+  delete from public.memories a
+  using public.memories b
+  where a.user_id = target_user_id
+    and b.user_id = target_user_id
+    and a.content = b.content
+    and a.type = b.type
+    and a.created_at < b.created_at;
+
+  -- 2. Decay confidence of old active memories (~10%/month)
+  -- Anti-memories and rejections never decay
+  update public.memories
+  set confidence = greatest(confidence * 0.97, 0.1)
+  where user_id = target_user_id
+    and created_at < now() - interval '30 days'
+    and is_active = true
+    and type not in ('anti_memory', 'rejection', 'correction');
+
+  -- 3. Expire memories past their valid_until date
+  update public.memories
+  set is_active = false
+  where user_id = target_user_id
+    and valid_until is not null
+    and valid_until < now()
+    and is_active = true;
+
+  -- 4. Delete inactive low-confidence memories older than 90 days
+  delete from public.memories
+  where user_id = target_user_id
+    and is_active = false
+    and confidence < 0.15
+    and created_at < now() - interval '90 days';
+
+  -- 5. Delete active but very stale low-confidence memories
+  delete from public.memories
+  where user_id = target_user_id
+    and is_active = true
+    and confidence < 0.15
+    and created_at < now() - interval '90 days'
+    and type not in ('anti_memory', 'rejection', 'correction');
+
+  -- 6. Cap at 200 active memories per user (keep highest confidence)
+  with ranked as (
+    select id,
+      row_number() over (
+        order by
+          case when type in ('anti_memory', 'rejection', 'correction') then 0 else 1 end,
+          confidence desc,
+          created_at desc
+      ) as rn
+    from public.memories
+    where user_id = target_user_id
+      and is_active = true
+  )
+  update public.memories
+  set is_active = false
+  where id in (
+    select id from ranked where rn > 200
+  );
+
+  -- 7. Clean up orphaned embeddings (fact/anti_memory whose memory was deleted)
+  delete from public.embeddings
+  where user_id = target_user_id
+    and source_type in ('fact', 'anti_memory')
+    and source_id is not null
+    and not exists (
+      select 1 from public.memories
+      where memories.id = embeddings.source_id
+    );
+end;
+$$ language plpgsql security definer;
+
+
+-- Memory Stats Helper (for debugging / monitoring)
+create or replace function public.get_user_memory_stats(target_user_id uuid)
+returns table (
+  active_count bigint,
+  inactive_count bigint,
+  total_count bigint,
+  avg_confidence float
+)
+language sql stable
+as $$
+  select
+    count(*) filter (where is_active = true),
+    count(*) filter (where is_active = false),
+    count(*),
+    avg(confidence)::float
+  from public.memories
+  where user_id = target_user_id;
+$$;
+
+
+-- Embedding Stats per Conversation (for debugging)
+create or replace function public.get_conversation_embedding_stats(
+  target_conversation_id uuid
+)
+returns table (
+  source_type text,
+  embedding_count bigint,
+  avg_embedding_norm float
+)
+language sql stable
+as $$
+  select
+    e.source_type,
+    count(*),
+    avg(vector_norm(e.embedding))::float
+  from public.embeddings e
+  where (e.metadata->>'conversation_id') = target_conversation_id::text
+  group by e.source_type
+  order by count(*) desc;
+$$;
+
+
+-- ============================================================
+-- REALTIME
+-- ============================================================
+-- Supabase manages realtime via publication membership only.
+-- No custom triggers needed — just add tables to the publication.
+-- Supabase Dashboard > Database > Replication will show these.
+
+do $$
+begin
+  -- Only add if not already a member (prevents errors on re-run)
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'messages'
+  ) then
+    alter publication supabase_realtime add table public.messages;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'conversations'
+  ) then
+    alter publication supabase_realtime add table public.conversations;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'folders'
+  ) then
+    alter publication supabase_realtime add table public.folders;
+  end if;
+end;
+$$;
+
+
+-- ============================================================
+-- VERIFICATION
+-- Run these after the migration to confirm everything was created
+-- ============================================================
+
+-- Check V4 conversations columns
+select 'conversations columns' as check_type, column_name, data_type
+from information_schema.columns
+where table_schema = 'public'
+  and table_name = 'conversations'
+  and column_name in (
+    'working_memory', 'document_registry', 'fingerprint',
+    'structured_summary', 'gemini_cache_name',
+    'key_entities', 'key_topics'
+  );
+
+-- Check V4 memories columns
+select 'memories columns' as check_type, column_name, data_type
+from information_schema.columns
+where table_schema = 'public'
+  and table_name = 'memories'
+  and column_name in ('is_active', 'valid_until', 'invalidated_by');
+
+-- Check all V4 functions exist
+select 'functions' as check_type, routine_name
+from information_schema.routines
+where routine_schema = 'public'
+  and routine_name in (
+    'hybrid_search',
+    'hybrid_search_scoped',
+    'find_similar_memory',
+    'search_similar_conversations',
+    'cleanup_memories_v4',
+    'get_user_memory_stats',
+    'get_conversation_embedding_stats',
+    'handle_new_user',
+    'auto_update_conversation',
+    'decrement_conversation_count',
+    'delete_orphaned_embeddings',
+    'delete_conversation_data',
+    'reset_daily_message_counts'
+  );
+
+-- Check all triggers
+select 'triggers' as check_type, tgname, relname as table_name
+from pg_trigger t
+join pg_class c on t.tgrelid = c.oid
+where tgname in (
+  'on_auth_user_created',
+  'on_message_insert',
+  'on_message_delete_update_count',
+  'on_message_delete_cleanup_embeddings',
+  'on_conversation_delete_cleanup'
+);
+
+-- Check realtime publication
+select 'realtime' as check_type, tablename
+from pg_publication_tables
+where pubname = 'supabase_realtime'
+  and schemaname = 'public';
+
+-- Check indexes
+select 'indexes' as check_type, indexname
+from pg_indexes
+where schemaname = 'public'
+  and indexname like 'idx_%'
+order by indexname;
+
 
 ---
 

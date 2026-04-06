@@ -32,7 +32,7 @@ export function ConversationList({ userId }: ConversationListProps) {
     const supabase = createClient();
     const { data } = await supabase
       .from('conversations')
-      .select('*')
+      .select('id, user_id, title, model, summary, system_prompt, topic, message_count, is_pinned, share_token, is_public, folder_id, created_at, updated_at')
       .eq('user_id', userId)
       .order('updated_at', { ascending: false })
       .limit(100);

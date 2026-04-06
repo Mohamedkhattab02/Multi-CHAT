@@ -54,11 +54,12 @@ export default function NewChatPage() {
             title: text.slice(0, 80) || 'New conversation',
             model: selectedModel,
           })
-          .select()
+          .select('id')
           .single();
 
         if (error || !conversation) {
-          toast.error('Failed to create conversation');
+          console.error('[CreateConversation] Error:', error);
+          toast.error(`Failed to create conversation: ${error?.message || 'unknown error'}`);
           setPendingMessage(null);
           return;
         }

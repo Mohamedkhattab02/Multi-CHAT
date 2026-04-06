@@ -1,6 +1,7 @@
 // ============================================================
-// Supabase Database Types
-// Generated from schema — update with: supabase gen types typescript
+// Supabase Database Types — V4
+// Updated for V4 schema: working_memory, fingerprint,
+// structured_summary, anti_memory, document_registry, etc.
 // ============================================================
 
 export type Json =
@@ -78,6 +79,14 @@ export interface Database {
           folder_id: string | null;
           created_at: string;
           updated_at: string;
+          // V4 columns (optional — not always selected to avoid vector serialization issues)
+          working_memory?: Json;
+          document_registry?: Json;
+          fingerprint?: number[] | null;
+          structured_summary?: Json | null;
+          gemini_cache_name?: string | null;
+          key_entities?: string[];
+          key_topics?: string[];
         };
         Insert: {
           id?: string;
@@ -94,6 +103,13 @@ export interface Database {
           folder_id?: string | null;
           created_at?: string;
           updated_at?: string;
+          working_memory?: Json;
+          document_registry?: Json;
+          fingerprint?: number[] | null;
+          structured_summary?: Json | null;
+          gemini_cache_name?: string | null;
+          key_entities?: string[];
+          key_topics?: string[];
         };
         Update: {
           id?: string;
@@ -110,6 +126,13 @@ export interface Database {
           folder_id?: string | null;
           created_at?: string;
           updated_at?: string;
+          working_memory?: Json;
+          document_registry?: Json;
+          fingerprint?: number[] | null;
+          structured_summary?: Json | null;
+          gemini_cache_name?: string | null;
+          key_entities?: string[];
+          key_topics?: string[];
         };
         Relationships: [
           {
@@ -176,29 +199,39 @@ export interface Database {
         Row: {
           id: string;
           user_id: string;
-          type: 'fact' | 'preference' | 'goal' | 'skill' | 'opinion';
+          type: 'fact' | 'preference' | 'goal' | 'skill' | 'opinion' | 'rejection' | 'correction' | 'constraint' | 'anti_memory';
           content: string;
           confidence: number;
           source_conversation_id: string | null;
           created_at: string;
+          // V4 columns
+          is_active: boolean;
+          valid_until: string | null;
+          invalidated_by: string | null;
         };
         Insert: {
           id?: string;
           user_id: string;
-          type: 'fact' | 'preference' | 'goal' | 'skill' | 'opinion';
+          type: 'fact' | 'preference' | 'goal' | 'skill' | 'opinion' | 'rejection' | 'correction' | 'constraint' | 'anti_memory';
           content: string;
           confidence?: number;
           source_conversation_id?: string | null;
           created_at?: string;
+          is_active?: boolean;
+          valid_until?: string | null;
+          invalidated_by?: string | null;
         };
         Update: {
           id?: string;
           user_id?: string;
-          type?: 'fact' | 'preference' | 'goal' | 'skill' | 'opinion';
+          type?: 'fact' | 'preference' | 'goal' | 'skill' | 'opinion' | 'rejection' | 'correction' | 'constraint' | 'anti_memory';
           content?: string;
           confidence?: number;
           source_conversation_id?: string | null;
           created_at?: string;
+          is_active?: boolean;
+          valid_until?: string | null;
+          invalidated_by?: string | null;
         };
         Relationships: [
           {
@@ -221,7 +254,7 @@ export interface Database {
         Row: {
           id: number;
           user_id: string;
-          source_type: 'message' | 'fact' | 'document' | 'summary';
+          source_type: 'message' | 'fact' | 'document' | 'summary' | 'anti_memory';
           source_id: string | null;
           content: string;
           embedding: number[];
@@ -231,7 +264,7 @@ export interface Database {
         Insert: {
           id?: number;
           user_id: string;
-          source_type: 'message' | 'fact' | 'document' | 'summary';
+          source_type: 'message' | 'fact' | 'document' | 'summary' | 'anti_memory';
           source_id?: string | null;
           content: string;
           embedding: number[];
@@ -241,7 +274,7 @@ export interface Database {
         Update: {
           id?: number;
           user_id?: string;
-          source_type?: 'message' | 'fact' | 'document' | 'summary';
+          source_type?: 'message' | 'fact' | 'document' | 'summary' | 'anti_memory';
           source_id?: string | null;
           content?: string;
           embedding?: number[];
@@ -438,9 +471,86 @@ export interface Database {
           id: number;
           content: string;
           source_type: string;
+          source_id: string | null;
           metadata: Json;
           created_at: string;
           score: number;
+        }>;
+      };
+      hybrid_search_scoped: {
+        Args: {
+          query_text: string;
+          query_embedding: number[];
+          target_user_id: string;
+          conversation_ids: string[];
+          match_count?: number;
+          full_text_weight?: number;
+          semantic_weight?: number;
+          fuzzy_weight?: number;
+          rrf_k?: number;
+        };
+        Returns: Array<{
+          id: number;
+          content: string;
+          source_type: string;
+          source_id: string | null;
+          metadata: Json;
+          created_at: string;
+          score: number;
+        }>;
+      };
+      find_similar_memory: {
+        Args: {
+          target_user_id: string;
+          query_embedding: number[];
+          similarity_threshold?: number;
+        };
+        Returns: Array<{
+          id: string;
+          content: string;
+          confidence: number;
+          similarity: number;
+        }>;
+      };
+      search_similar_conversations: {
+        Args: {
+          query_embedding_256: number[];
+          target_user_id: string;
+          match_count?: number;
+        };
+        Returns: Array<{
+          id: string;
+          title: string;
+          topic: string;
+          similarity: number;
+          message_count: number;
+        }>;
+      };
+      cleanup_memories_v4: {
+        Args: {
+          target_user_id: string;
+        };
+        Returns: void;
+      };
+      get_user_memory_stats: {
+        Args: {
+          target_user_id: string;
+        };
+        Returns: Array<{
+          active_count: number;
+          inactive_count: number;
+          total_count: number;
+          avg_confidence: number;
+        }>;
+      };
+      get_conversation_embedding_stats: {
+        Args: {
+          target_conversation_id: string;
+        };
+        Returns: Array<{
+          source_type: string;
+          embedding_count: number;
+          avg_embedding_norm: number;
         }>;
       };
     };

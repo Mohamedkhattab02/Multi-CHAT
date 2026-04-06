@@ -10,7 +10,7 @@ export async function getConversation(conversationId: string): Promise<Conversat
 
   const { data } = await supabase
     .from('conversations')
-    .select('*')
+    .select('id, user_id, title, model, summary, system_prompt, topic, message_count, is_pinned, share_token, is_public, folder_id, created_at, updated_at')
     .eq('id', conversationId)
     .eq('user_id', user.id)
     .single();
@@ -35,7 +35,7 @@ export async function getSharedConversation(shareToken: string) {
 
   const { data: conversation } = await supabase
     .from('conversations')
-    .select('*')
+    .select('id, user_id, title, model, summary, system_prompt, topic, message_count, is_pinned, share_token, is_public, folder_id, created_at, updated_at')
     .eq('share_token', shareToken)
     .eq('is_public', true)
     .single();

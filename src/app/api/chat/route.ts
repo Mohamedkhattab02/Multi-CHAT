@@ -1,22 +1,32 @@
 // ============================================================
-// Main SSE Streaming Chat Endpoint — orchestrates all 7 layers
+// Main SSE Streaming Chat Endpoint — V4 Orchestrator
 // POST /api/chat
-// Features: Arcjet rate limiting, Zod validation, AbortController,
-// heartbeat, Sentry capture, usage logging, smart routing
+// Orchestrates all V4 layers:
+//   Layer 0: Memory Invalidation
+//   Layer 1: Classifier (Gemini 2.5 Flash)
+//   Layer 2: RAG Pipeline (8-step)
+//   Layer 3: Context Assembly (stable prefix + variable suffix)
+//   Layer 4: Generation (streaming + caching)
+//   Layer 5: Post-Processing (embed, summary, WM, anti-memory)
 // ============================================================
 
 import { NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { classifyIntent, routeByComplexity } from '@/lib/ai/classifier';
-import { retrieveMemories } from '@/lib/memory/rag-pipeline';
+import { detectAndHandleInvalidation } from '@/lib/memory/invalidation';
+import { retrieveMemories, type RetrievedContext } from '@/lib/memory/rag-pipeline';
 import { assembleContext } from '@/lib/memory/context-assembler';
+import { processDocument } from '@/lib/memory/document-processor';
 import { streamGPT } from '@/lib/ai/openai';
 import { streamGemini } from '@/lib/ai/gemini';
 import { streamGLM } from '@/lib/ai/glm';
 import { generateImage } from '@/lib/ai/gemini-image';
-import { generateRollingSummary, generateTitle } from '@/lib/memory/rolling-summary';
-import { storeMessageEmbedding } from '@/lib/memory/embed-store';
+import { generateRollingSummary, saveStructuredSummary, generateTitle, type StructuredSummary } from '@/lib/memory/rolling-summary';
+import { storeMessageEmbedding, promoteTempEmbedding } from '@/lib/memory/embed-store';
 import { extractMemories } from '@/lib/memory/extract-memories';
+import { updateWorkingMemory, type WorkingMemory } from '@/lib/memory/working-memory';
+import { detectAntiMemory } from '@/lib/memory/anti-memory';
+import { updateConversationFingerprint } from '@/lib/memory/conversation-fingerprint';
 import { ChatMessageSchema } from '@/lib/security/validate';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
@@ -50,7 +60,6 @@ export async function POST(req: NextRequest) {
   }
 
   const { conversationId, model, attachments } = body;
-  // If user sends only attachments with no text, provide a default prompt
   const message = body.message || (attachments?.length ? 'Analyze the attached file' : '');
   if (!message && !attachments?.length) {
     return new Response(
@@ -89,23 +98,42 @@ export async function POST(req: NextRequest) {
     })
     .eq('id', user.id);
 
-  // ═══ LAYER 1: INPUT PROCESSING + SMART ROUTING ═══
+  // ═══ LAYER 0: MEMORY INVALIDATION ═══
+  if (conversationId) {
+    detectAndHandleInvalidation(user.id, conversationId, message)
+      .catch(err => Sentry.captureException(err, { tags: { action: 'invalidation' } }));
+  }
+
+  // ═══ LAYER 1: INPUT PROCESSING + SMART ROUTING ═���═
   const hasImageAttachment = attachments?.some((a) =>
     a.type?.startsWith('image')
   );
 
-  // Extract text content from PDF/text attachments and append to message
+  // Extract text content from PDF/text attachments
   let enrichedMessage = message;
+  const documentProcessingPromises: Promise<void>[] = [];
+
   if (attachments?.length) {
     const textParts: string[] = [];
     for (const att of attachments) {
       if (!att.data) continue;
       if (att.type === 'application/pdf') {
-        // Decode base64 PDF and extract text
         try {
           const pdfText = await extractPdfText(att.data);
           if (pdfText.trim()) {
             textParts.push(`[Attached PDF: ${att.name}]\n${pdfText}`);
+            // V4: Process document with structure-aware chunking
+            if (conversationId) {
+              documentProcessingPromises.push(
+                processDocument({
+                  userId: user.id,
+                  conversationId,
+                  fileName: att.name || 'document.pdf',
+                  content: pdfText,
+                  fileType: 'pdf',
+                }).then(() => {})
+              );
+            }
           }
         } catch (err) {
           Sentry.captureException(err, { tags: { action: 'pdf_extract' } });
@@ -115,6 +143,18 @@ export async function POST(req: NextRequest) {
         try {
           const textContent = Buffer.from(att.data, 'base64').toString('utf-8');
           textParts.push(`[Attached file: ${att.name}]\n${textContent}`);
+          // V4: Process text documents too
+          if (conversationId) {
+            documentProcessingPromises.push(
+              processDocument({
+                userId: user.id,
+                conversationId,
+                fileName: att.name || 'file.txt',
+                content: textContent,
+                fileType: att.type,
+              }).then(() => {})
+            );
+          }
         } catch {
           textParts.push(`[Attached file: ${att.name} — could not read]`);
         }
@@ -125,6 +165,12 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Fire document processing in background
+  if (documentProcessingPromises.length > 0) {
+    Promise.all(documentProcessingPromises)
+      .catch(err => Sentry.captureException(err, { tags: { action: 'document_processing' } }));
+  }
+
   const intent = await classifyIntent(enrichedMessage, hasImageAttachment);
 
   // ═══ SPECIAL ROUTE: Image Generation ═══
@@ -132,7 +178,6 @@ export async function POST(req: NextRequest) {
     try {
       const imageResult = await generateImage(message);
 
-      // Save user message
       if (conversationId) {
         await supabase.from('messages').insert({
           conversation_id: conversationId,
@@ -140,7 +185,6 @@ export async function POST(req: NextRequest) {
           content: message,
           model: 'gemini-3.1-flash-image',
         });
-        // Save assistant image response
         await supabase.from('messages').insert({
           conversation_id: conversationId,
           role: 'assistant',
@@ -174,56 +218,43 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Determine actual model (with routing overrides + complexity routing)
+  // Determine actual model
   let actualModel: string;
   if (intent.routeOverride !== 'none') {
-    // Special routes (image gen, web search, vision) override everything
     actualModel = intent.routeOverride;
   } else {
-    // Smart complexity routing: downgrade easy questions, upgrade hard ones
     actualModel = routeByComplexity(model, intent.complexity);
   }
 
-  // ═══ LAYER 2: MEMORY RETRIEVAL (RAG) + Reranking ═══
-  // RAG is the primary way to access older conversation context.
-  // Since we only send the last 5 messages directly, RAG retrieves
-  // relevant older messages, facts, and summaries from embeddings.
-  let ragContext = '';
-  if (intent.needsRAG) {
-    try {
-      ragContext = await retrieveMemories(user.id, message, 8, conversationId || undefined);
-    } catch (err) {
-      Sentry.captureException(err, { tags: { action: 'rag_retrieval' } });
-    }
-  }
-
-  // ═══ LAYER 3: CONTEXT ASSEMBLY ═══
-  // KEY DESIGN: Only send the last 5 messages as direct context.
-  // Older context is retrieved via RAG (Layer 2) when needed.
-  // This makes RAG actually useful and reduces token costs dramatically.
-  const RECENT_MESSAGE_LIMIT = 5;
-
+  // ═══ LOAD CONVERSATION DATA FIRST (needed to decide RAG) ═══
   let conversation = null;
   let recentHistory: Array<{ role: string; content: string }> = [];
   let totalMessageCount = 0;
+  let workingMemory: WorkingMemory | null = null;
+  let structuredSummary: StructuredSummary | null = null;
+  let documentRegistry: Array<{ filename: string; summary: string }> = [];
 
   if (conversationId) {
     const { data: conv } = await supabase
       .from('conversations')
-      .select('*')
+      .select('id, user_id, title, model, summary, system_prompt, topic, message_count, is_pinned, folder_id, created_at, updated_at, working_memory, document_registry, structured_summary, gemini_cache_name, key_entities, key_topics')
       .eq('id', conversationId)
       .single();
     conversation = conv;
     totalMessageCount = conv?.message_count || 0;
 
-    // Only fetch the last N messages — NOT the full history
+    // Extract V4 fields
+    workingMemory = conv?.working_memory as unknown as WorkingMemory | null;
+    structuredSummary = conv?.structured_summary as unknown as StructuredSummary | null;
+    documentRegistry = (conv?.document_registry as unknown as Array<{ filename: string; summary: string }>) || [];
+
+    // Fetch recent messages (adaptive window applied in assembler)
     const { data: msgs } = await supabase
       .from('messages')
       .select('role, content, content_blocks')
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: false })
-      .limit(RECENT_MESSAGE_LIMIT);
-    // Reverse back to chronological order
+      .limit(10);
     recentHistory = (msgs || []).reverse();
 
     // Save user message to DB
@@ -234,32 +265,59 @@ export async function POST(req: NextRequest) {
       model: actualModel,
       attachments: attachments || [],
     });
+  }
 
-    // Update message count on conversation
-    await supabase
-      .from('conversations')
-      .update({ message_count: totalMessageCount + 1 })
-      .eq('id', conversationId);
+  // ═══ LAYER 2: MEMORY RETRIEVAL (RAG) — V4 8-step pipeline ═══
+  // Force RAG when conversation has documents — user may reference them at any time
+  const hasDocuments = documentRegistry.length > 0;
+  const shouldRunRAG = (intent.needsRAG || hasDocuments) && !!conversationId;
 
-    // Embed user message in background (for RAG retrieval)
-    storeMessageEmbedding(user.id, message, conversationId, 'user')
-      .catch((err) => Sentry.captureException(err, { tags: { action: 'embed_user_msg' } }));
+  let ragContext: RetrievedContext | null = null;
+  if (shouldRunRAG && conversationId) {
+    try {
+      const conversationContext = recentHistory
+        .slice(-3)
+        .map(m => `${m.role}: ${m.content.slice(0, 200)}`)
+        .join('\n');
+
+      // If conversation has documents, force the classifier hints
+      // so the RAG pipeline runs document retrieval
+      const ragClassification = hasDocuments
+        ? { ...intent, referencesDocument: true, needsRAG: true }
+        : intent;
+
+      ragContext = await retrieveMemories({
+        userId: user.id,
+        conversationId,
+        message,
+        conversationContext,
+        classification: ragClassification,
+      });
+    } catch (err) {
+      Sentry.captureException(err, { tags: { action: 'rag_retrieval' } });
+    }
   }
 
   const { systemPrompt, messages: assembledMessages } = assembleContext({
     model: actualModel,
-    userProfile,
+    userProfile: userProfile ? {
+      name: userProfile.name,
+      language: userProfile.language,
+      expertise: userProfile.expertise,
+    } : null,
     ragContext,
     messages: [...recentHistory, { role: 'user', content: enrichedMessage }],
     rollingSummary: conversation?.summary,
+    structuredSummary,
+    workingMemory,
+    documentRegistry,
+    classification: intent,
     language: intent.language,
   });
 
   // ═══ LAYER 4: GENERATION (STREAMING) with AbortController ═══
   const encoder = new TextEncoder();
   const abortController = new AbortController();
-
-  // Clean up on client disconnect
   req.signal.addEventListener('abort', () => abortController.abort());
 
   const stream = new ReadableStream({
@@ -305,14 +363,14 @@ export async function POST(req: NextRequest) {
             throw new Error(`Unknown model: ${actualModel}`);
         }
 
-        // Heartbeat to prevent timeout (every 15s)
+        // Heartbeat to prevent timeout
         const heartbeatInterval = setInterval(() => {
           if (!abortController.signal.aborted) {
             controller.enqueue(encoder.encode(': heartbeat\n\n'));
           }
         }, 15000);
 
-        // Send routing override info if applicable
+        // Send routing info
         if (intent.routeOverride !== 'none') {
           controller.enqueue(
             encoder.encode(
@@ -340,7 +398,7 @@ export async function POST(req: NextRequest) {
           } else if (event.type === 'done') {
             clearInterval(heartbeatInterval);
 
-            // ═══ LAYER 5: POST-PROCESSING ═══
+            // ═══ LAYER 5: POST-PROCESSING (V4) ═══
             if (conversationId) {
               // Save assistant message
               await supabase.from('messages').insert({
@@ -351,15 +409,23 @@ export async function POST(req: NextRequest) {
                 model: actualModel,
               });
 
-              // Embed assistant message in background (for RAG retrieval)
-              if (event.fullText) {
-                storeMessageEmbedding(user.id, event.fullText, conversationId, 'assistant')
-                  .catch((err) => Sentry.captureException(err, { tags: { action: 'embed_assistant_msg' } }));
+              const messageCount = totalMessageCount + 2;
+
+              // 1. Promote pre-embed from RAG step
+              if (ragContext?.tempMessageId) {
+                promoteTempEmbedding(ragContext.tempMessageId)
+                  .catch(err => Sentry.captureException(err));
               }
 
-              // Usage logging
+              // 2. Embed assistant response
+              if (event.fullText) {
+                storeMessageEmbedding(user.id, event.fullText, conversationId, 'assistant')
+                  .catch(err => Sentry.captureException(err, { tags: { action: 'embed_assistant' } }));
+              }
+
+              // 3. Usage logging
               if (event.usage) {
-                await supabase
+                supabase
                   .from('usage_logs')
                   .insert({
                     user_id: user.id,
@@ -369,34 +435,57 @@ export async function POST(req: NextRequest) {
                     cost_usd: event.usage.cost,
                     endpoint: 'chat',
                   })
-                  .then(() => {}); // non-critical, fire and forget
+                  .then(() => {});
               }
 
-              // Rolling summary every 10 messages
-              const messageCount = totalMessageCount + 2;
+              // 4. Rolling summary (V4: incremental patching) every 10 messages
               if (messageCount > 12 && messageCount % 10 === 0) {
                 generateRollingSummary(
                   conversation?.summary,
+                  structuredSummary,
                   recentHistory.slice(-5),
                   message,
                   event.fullText || ''
                 )
-                  .then(async (summary) => {
-                    await supabase
-                      .from('conversations')
-                      .update({ summary })
-                      .eq('id', conversationId);
+                  .then(async ({ text, structured }) => {
+                    await saveStructuredSummary(conversationId, text, structured);
                   })
-                  .catch((err) => Sentry.captureException(err));
+                  .catch(err => Sentry.captureException(err));
               }
 
-              // Extract memories every 5 messages (fire and forget)
+              // 5. Working memory update every 3 messages or phase change
+              if (messageCount % 3 === 0 || intent.workingMemoryPhase !== 'none') {
+                updateWorkingMemory(
+                  conversationId,
+                  [...recentHistory.slice(-5), { role: 'user', content: message }, { role: 'assistant', content: event.fullText || '' }],
+                  intent
+                ).catch(err => Sentry.captureException(err));
+              }
+
+              // 6. Extract memories every 5 messages (with V4 dedup)
               if (messageCount > 0 && messageCount % 5 === 0 && event.fullText) {
-                extractMemories(user.id, message, event.fullText)
-                  .catch((err) => Sentry.captureException(err, { tags: { action: 'extract_memories' } }));
+                extractMemories(user.id, message, event.fullText, conversationId)
+                  .catch(err => Sentry.captureException(err, { tags: { action: 'extract_memories' } }));
               }
 
-              // Auto-generate title for new conversations + update model
+              // 7. Anti-memory detection
+              if (event.fullText) {
+                const lastAssistantMsg = recentHistory
+                  .filter(m => m.role === 'assistant')
+                  .pop();
+                if (lastAssistantMsg) {
+                  detectAntiMemory(message, lastAssistantMsg.content, user.id, conversationId)
+                    .catch(err => Sentry.captureException(err));
+                }
+              }
+
+              // 8. Conversation fingerprint update every 20 messages
+              if (messageCount > 0 && messageCount % 20 === 0) {
+                updateConversationFingerprint(conversationId)
+                  .catch(err => Sentry.captureException(err));
+              }
+
+              // Auto-generate title for new conversations
               if (totalMessageCount === 0) {
                 generateTitle(message, event.fullText || '')
                   .then(async (title) => {
@@ -409,7 +498,7 @@ export async function POST(req: NextRequest) {
                       })
                       .eq('id', conversationId);
                   })
-                  .catch((err) => Sentry.captureException(err));
+                  .catch(err => Sentry.captureException(err));
               }
             }
 
