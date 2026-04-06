@@ -4,6 +4,9 @@ import { withSentryConfig } from '@sentry/nextjs';
 const nextConfig: NextConfig = {
   reactCompiler: true,
 
+  // pdf-parse-new uses dynamic requires that break webpack bundling
+  serverExternalPackages: ['pdf-parse-new'],
+
   images: {
     remotePatterns: [
       { protocol: 'https', hostname: '*.supabase.co' },

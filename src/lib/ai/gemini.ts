@@ -52,6 +52,15 @@ export async function* streamGemini(params: StreamGeminiParams): AsyncGenerator<
   const geminiHistory = convertToGeminiHistory(messages.slice(0, -1));
   const lastMessage = messages[messages.length - 1];
 
+  // Safety: ensure we have a user message to send
+  if (!lastMessage || lastMessage.role !== 'user') {
+    yield {
+      type: 'error',
+      text: 'No user message to send to Gemini.',
+    };
+    return;
+  }
+
   try {
     const chat = geminiModel.startChat({
       history: geminiHistory,
@@ -95,20 +104,57 @@ export async function* streamGemini(params: StreamGeminiParams): AsyncGenerator<
   }
 }
 
-function convertToGeminiHistory(messages: Array<{ role: string; content: string }>) {
-  const filtered = messages.filter((m) => m.role !== 'system');
+/**
+ * Convert chat messages to Gemini history format.
+ *
+ * Gemini enforces TWO rules:
+ *   1. First turn MUST be 'user'
+ *   2. Turns MUST strictly alternate: user → model → user → model ...
+ *
+ * Since sendMessageStream sends the final user message separately,
+ * the history must:
+ *   - Start with 'user'
+ *   - End with 'model' (so the next user message alternates correctly)
+ */
+function convertToGeminiHistory(
+  messages: Array<{ role: string; content: string }>
+): Array<{ role: string; parts: Array<{ text: string }> }> {
+  // Step 1: filter out system messages and empty content
+  const filtered = messages.filter(
+    (m) => m.role !== 'system' && m.content.trim().length > 0
+  );
 
-  // Gemini requires strictly alternating user/model turns.
-  // Merge consecutive same-role messages to avoid API errors.
+  if (filtered.length === 0) return [];
+
+  // Step 2: convert roles and merge consecutive same-role messages
   const merged: Array<{ role: string; parts: Array<{ text: string }> }> = [];
   for (const m of filtered) {
     const geminiRole = m.role === 'assistant' ? 'model' : 'user';
     const last = merged[merged.length - 1];
+
     if (last && last.role === geminiRole) {
+      // Same role as previous — merge content
       last.parts[0].text += '\n\n' + m.content;
     } else {
       merged.push({ role: geminiRole, parts: [{ text: m.content }] });
     }
   }
+
+  // Step 3: enforce first = 'user'
+  // If history starts with 'model', the previous assistant response
+  // leaked in. Drop it — it's not useful as history context anyway.
+  while (merged.length > 0 && merged[0].role === 'model') {
+    merged.shift();
+  }
+
+  // Step 4: enforce last = 'model'
+  // History is passed to startChat(), then sendMessageStream() sends
+  // the final user message. If history ends with 'user', we'd get
+  // two consecutive 'user' turns → API error.
+  // Drop trailing 'user' entries.
+  while (merged.length > 0 && merged[merged.length - 1].role === 'user') {
+    merged.pop();
+  }
+
   return merged;
 }

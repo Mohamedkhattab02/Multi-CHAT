@@ -185,7 +185,7 @@ export async function classifyIntent(
     };
   }
 
-  // Full LLM classification using Gemini 2.5 Flash with JSON mode
+    // Full LLM classification using Gemini 2.5 Flash with JSON mode
   try {
     const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY!);
     const model = genAI.getGenerativeModel({
@@ -255,13 +255,29 @@ User message: ${message}`,
     });
 
     const text = result.response.text();
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.warn('[Classifier] No JSON found, raw text:', text.slice(0, 500));
-      return { ...FALLBACK, language, hasCodeMarkers, referencesDocument };
+
+    // Strip BOM and whitespace that Gemini sometimes prepends
+    const cleaned = text.replace(/^\uFEFF/, '').trim();
+
+    // Attempt 1: direct parse (works 99% of the time with responseMimeType=json)
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // Attempt 2: extract JSON from text that might have wrapping
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.warn('[Classifier] No JSON found, raw text:', cleaned.slice(0, 500));
+        return { ...FALLBACK, language, hasCodeMarkers, referencesDocument };
+      }
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch {
+        console.warn('[Classifier] Extracted text is not valid JSON:', jsonMatch[0].slice(0, 200));
+        return { ...FALLBACK, language, hasCodeMarkers, referencesDocument };
+      }
     }
 
-    const parsed = JSON.parse(jsonMatch[0]);
     return ClassificationSchema.parse(parsed);
   } catch (error) {
     Sentry.captureException(error, {

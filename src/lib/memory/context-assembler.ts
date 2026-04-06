@@ -6,7 +6,6 @@
 // Density-aware budgeting: code > prose > chitchat
 // ============================================================
 
-import { TOKEN_BUDGETS, type ModelId } from '@/lib/utils/constants';
 import { estimateTokens } from '@/lib/utils/tokens';
 import { computeDensity, temperatureWeight } from '@/lib/memory/token-density';
 import type { RetrievedResult, RetrievedContext } from '@/lib/memory/rag-pipeline';
@@ -14,7 +13,6 @@ import type { WorkingMemory } from '@/lib/memory/working-memory';
 import type { StructuredSummary } from '@/lib/memory/rolling-summary';
 import type { ClassificationResult } from '@/lib/ai/classifier';
 
-// V4 token budgets per model
 const V4_BUDGETS: Record<string, {
   system: number;
   stable: number;
@@ -46,7 +44,6 @@ interface AssembleParams {
   rollingSummary?: string | null;
   structuredSummary?: StructuredSummary | null;
   workingMemory?: WorkingMemory | null;
-  documentRegistry?: Array<{ filename: string; summary: string }>;
   classification: ClassificationResult;
   language: string;
 }
@@ -59,13 +56,11 @@ interface AssembledContext {
 export function assembleContext(params: AssembleParams): AssembledContext {
   const budget = V4_BUDGETS[params.model] ?? V4_BUDGETS['gemini-3.1-pro'];
 
-  // ═══ STABLE PREFIX (cacheable by Gemini) ���══
   const systemPrompt = buildStablePrefix(params, budget);
 
-  // ═══ VARIABLE SUFFIX ═══
   const assembledMessages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
 
-  // Inject document chunks as their own section (highest priority)
+  // Document chunks (highest priority)
   if (params.ragContext?.documentChunks?.length) {
     const docBlock = buildDocumentBlock(params.ragContext.documentChunks, budget);
     if (docBlock) {
@@ -76,7 +71,7 @@ export function assembleContext(params: AssembleParams): AssembledContext {
     }
   }
 
-  // Inject RAG memories by temperature tier (non-document)
+  // RAG memories by temperature tier (non-document, skip messages)
   if (params.ragContext) {
     const ragBlock = buildRAGBlock(params.ragContext, budget);
     if (ragBlock) {
@@ -87,12 +82,10 @@ export function assembleContext(params: AssembleParams): AssembledContext {
     }
   }
 
-  // Determine adaptive window size
+  // Adaptive window of recent messages
   const windowSize = determineWindowSize(params.classification, params.ragContext);
-
-  // Add recent messages (adaptive window)
   const recentMessages = trimToTokenBudget(
-    params.messages.slice(-(windowSize + 1)), // +1 for current
+    params.messages.slice(-(windowSize + 1)),
     budget.recent
   );
   assembledMessages.push(...recentMessages);
@@ -106,7 +99,6 @@ function buildStablePrefix(
 ): string {
   const parts: string[] = [];
 
-  // Core identity
   parts.push(
     'You are MultiChat AI, a helpful multi-model AI assistant.',
     'You provide accurate, clear, and well-structured responses.',
@@ -115,7 +107,6 @@ function buildStablePrefix(
     'Be concise but thorough.'
   );
 
-  // Language instruction
   if (params.language && params.language !== 'auto' && params.language !== 'en') {
     const langNames: Record<string, string> = {
       he: 'Hebrew', en: 'English', ar: 'Arabic', mixed: 'the same language as the user',
@@ -125,7 +116,6 @@ function buildStablePrefix(
     parts.push('Respond in the same language as the user\'s message.');
   }
 
-  // User profile
   if (params.userProfile) {
     const profile: string[] = [];
     if (params.userProfile.name) profile.push(`Name: ${params.userProfile.name}`);
@@ -140,15 +130,15 @@ function buildStablePrefix(
     }
   }
 
-  // Document registry
-  if (params.documentRegistry && params.documentRegistry.length > 0) {
-    const docs = params.documentRegistry
+  // Document registry — from ragContext (self-sufficient)
+  const documentRegistry = params.ragContext?.documentRegistry;
+  if (documentRegistry && documentRegistry.length > 0) {
+    const docs = documentRegistry
       .map(d => `- "${d.filename}": ${d.summary}`)
       .join('\n');
     parts.push(`\nDocuments in this conversation:\n${docs}`);
   }
 
-  // Working memory (current task + phase)
   if (params.workingMemory && params.workingMemory.current_task) {
     const wm = params.workingMemory;
     const wmParts: string[] = [];
@@ -160,7 +150,6 @@ function buildStablePrefix(
     parts.push('\nCurrent task (working memory):\n' + wmParts.map(p => `- ${p}`).join('\n'));
   }
 
-  // Macro summary (conversation arc)
   if (params.structuredSummary?.narrative) {
     parts.push(`\nConversation so far:\n${params.structuredSummary.narrative}`);
     if (params.structuredSummary.decisions.length > 0) {
@@ -177,18 +166,12 @@ function buildStablePrefix(
   return full.slice(0, (budget.system + budget.stable) * 4);
 }
 
-/**
- * Build a dedicated document section.
- * Chunks are already sorted by file + chunk_index in reading order.
- * Uses the HOT budget (document content is highest priority when referenced).
- */
 function buildDocumentBlock(
   documentChunks: RetrievedResult[],
   budget: typeof V4_BUDGETS[string]
 ): string | null {
   if (documentChunks.length === 0) return null;
 
-  // Group chunks by file name
   const byFile = new Map<string, RetrievedResult[]>();
   for (const chunk of documentChunks) {
     const fileName = String(chunk.metadata?.file_name || 'document');
@@ -198,11 +181,9 @@ function buildDocumentBlock(
 
   const sections: string[] = [];
   let totalTokens = 0;
-  // Document chunks get the HOT budget — they're the most important when referenced
   const maxTokens = budget.hot;
 
   for (const [fileName, chunks] of byFile) {
-    // Sort by chunk_index within each file
     chunks.sort((a, b) =>
       (Number(a.metadata?.chunk_index) || 0) - (Number(b.metadata?.chunk_index) || 0)
     );
@@ -233,26 +214,23 @@ function buildRAGBlock(
   const sections: string[] = [];
   let totalTokens = 0;
 
-  // HOT memories — always injected (up to 60% of combined budget)
   const hotBudget = budget.hot;
-  const hotContent = formatMemories(ragContext.hot, hotBudget);
+  const hotContent = formatMemories(ragContext.hot, hotBudget, true);
   if (hotContent) {
     sections.push(hotContent);
     totalTokens += estimateTokens(hotContent);
   }
 
-  // WARM memories — if budget allows
   if (totalTokens < hotBudget + budget.warm) {
-    const warmContent = formatMemories(ragContext.warm, budget.warm);
+    const warmContent = formatMemories(ragContext.warm, budget.warm, true);
     if (warmContent) {
       sections.push(warmContent);
       totalTokens += estimateTokens(warmContent);
     }
   }
 
-  // COLD memories — fill remaining
   if (totalTokens < hotBudget + budget.warm + budget.cold) {
-    const coldContent = formatMemories(ragContext.cold, budget.cold);
+    const coldContent = formatMemories(ragContext.cold, budget.cold, true);
     if (coldContent) {
       sections.push(coldContent);
     }
@@ -262,11 +240,20 @@ function buildRAGBlock(
   return sections.join('\n\n') + '\n\nUse this context naturally when relevant. Do not mention that you retrieved it from memory.';
 }
 
-function formatMemories(memories: RetrievedResult[], maxTokens: number): string {
+function formatMemories(
+  memories: RetrievedResult[],
+  maxTokens: number,
+  skipMessageSource: boolean = false
+): string {
   if (memories.length === 0) return '';
 
-  // Sort by density × score for priority
-  const scored = memories.map(m => ({
+  const filtered = skipMessageSource
+    ? memories.filter(m => m.source_type !== 'message')
+    : memories;
+
+  if (filtered.length === 0) return '';
+
+  const scored = filtered.map(m => ({
     ...m,
     priority: computeDensity(m.content) * temperatureWeight(m.temperature) * m.score,
   }));
@@ -287,17 +274,10 @@ function formatMemories(memories: RetrievedResult[], maxTokens: number): string 
 }
 
 function formatMemoryLine(m: RetrievedResult): string {
-  const timeAgo = formatTimeAgo(m.created_at);
-  if (m.source_type === 'anti_memory') {
-    return `⚠️ ${m.content}`;
-  }
-  if (m.source_type === 'fact') {
-    return `• ${m.content}`;
-  }
-  if (m.source_type === 'document') {
-    return `📎 ${m.content}`;
-  }
-  return `[${m.source_type}, ${timeAgo}] ${m.content}`;
+  if (m.source_type === 'anti_memory') return `⚠️ ${m.content}`;
+  if (m.source_type === 'fact') return `• ${m.content}`;
+  if (m.source_type === 'document') return `📎 ${m.content}`;
+  return `[${m.source_type}] ${m.content}`;
 }
 
 function formatTimeAgo(dateStr: string): string {
@@ -311,9 +291,6 @@ function formatTimeAgo(dateStr: string): string {
   return `${Math.floor(days / 30)}mo ago`;
 }
 
-/**
- * Adaptive window size based on classification and RAG results.
- */
 function determineWindowSize(
   classification: ClassificationResult,
   ragContext: RetrievedContext | null
@@ -326,7 +303,7 @@ function determineWindowSize(
   const ragCount = ragContext
     ? ragContext.hot.length + ragContext.warm.length + ragContext.cold.length
     : 0;
-  if (ragCount >= 8) return 3; // RAG is carrying the weight
+  if (ragCount >= 8) return 3;
   return 5;
 }
 
