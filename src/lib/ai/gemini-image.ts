@@ -1,63 +1,49 @@
-// ============================================================
-// Gemini 3.1 Flash Image Preview — Image Generation at 1K res
-// Triggered when classifier detects image generation intent
-// ============================================================
-
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import * as Sentry from '@sentry/nextjs';
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY!);
-
-export interface ImageGenerationResult {
+export async function generateImage(prompt: string): Promise<{
   imageBase64: string;
   mimeType: string;
   revisedPrompt: string;
-}
-
-export async function generateImage(prompt: string): Promise<ImageGenerationResult> {
+}> {
   try {
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-3.1-flash-image-preview',
-      generationConfig: {
-        // @ts-expect-error -- responseModalities not yet in SDK types
-        responseModalities: ['image', 'text'],
+    const apiKey = process.env.GOOGLE_AI_API_KEY;
+    const modelId = 'gemini-3.1-flash-image-preview';
+    const baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+    const res = await fetch(`${baseUrl}/${modelId}:generateContent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
       },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseModalities: ['image', 'text'],
+        },
+      }),
     });
 
-    const result = await model.generateContent(prompt);
-    const response = result.response;
-    const parts = response.candidates?.[0]?.content?.parts;
-
-    if (!parts) {
-      throw new Error('No response parts from Gemini Image');
+    if (!res.ok) {
+      throw new Error(`Gemini Image API error: ${res.status}`);
     }
 
-    // Find image and text parts
-    let imageBase64 = '';
-    let mimeType = 'image/png';
-    let revisedPrompt = prompt;
+    const data = await res.json();
+    const imagePart = data.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData);
 
-    for (const part of parts) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const p = part as any;
-      if (p.inlineData) {
-        imageBase64 = p.inlineData.data;
-        mimeType = p.inlineData.mimeType || 'image/png';
-      }
-      if (p.text) {
-        revisedPrompt = p.text;
-      }
+    if (!imagePart?.inlineData) {
+      throw new Error('No image generated');
     }
 
-    if (!imageBase64) {
-      throw new Error('No image generated in response');
-    }
+    const textPart = data.candidates?.[0]?.content?.parts?.find((p: any) => p.text);
 
-    return { imageBase64, mimeType, revisedPrompt };
+    return {
+      imageBase64: imagePart.inlineData.data,
+      mimeType: imagePart.inlineData.mimeType || 'image/png',
+      revisedPrompt: textPart?.text || prompt,
+    };
   } catch (error) {
-    Sentry.captureException(error, {
-      tags: { model: 'gemini-3.1-flash-image-preview', action: 'generate_image' },
-    });
+    Sentry.captureException(error, { tags: { model: 'gemini-flash-image' } });
     throw error;
   }
 }

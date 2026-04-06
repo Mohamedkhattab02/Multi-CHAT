@@ -2,10 +2,12 @@
 // Extract Memories — Layer 5 of 7-layer memory system
 // Extracts user facts/preferences/goals from conversation
 // Uses Gemini 2.0 Flash (fast + cheap) for extraction
+// V4: Includes semantic dedup via find_similar_memory RPC
 // Runs every 5 messages (called from route.ts)
 // ============================================================
 
-import { createServiceClient } from '@/lib/supabase/server';
+import { createClient } from '@supabase/supabase-js';
+import { generateEmbedding } from '@/lib/ai/embeddings';
 import * as Sentry from '@sentry/nextjs';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
@@ -70,18 +72,56 @@ Assistant: "${response.slice(0, 500)}"`,
     if (memories.length === 0) return;
 
     const validTypes = ['fact', 'preference', 'goal', 'skill', 'opinion'];
-    const rows = memories
-      .filter((m: { content?: string }) => m.content && typeof m.content === 'string')
-      .map((m: { type?: string; content?: string; confidence?: number }) => ({
-        user_id: userId,
-        type: validTypes.includes(m.type || '') ? m.type : 'fact',
-        content: String(m.content).slice(0, 500),
-        confidence: Math.min(Math.max(Number(m.confidence) || 0.5, 0), 1),
-      }));
 
-    if (rows.length > 0) {
-      const supabase = createServiceClient();
-      await supabase.from('memories').insert(rows);
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
+
+    for (const m of memories) {
+      if (!m.content || typeof m.content !== 'string') continue;
+
+      const type = validTypes.includes(m.type || '') ? m.type : 'fact';
+      const content = String(m.content).slice(0, 500);
+      const confidence = Math.min(Math.max(Number(m.confidence) || 0.5, 0), 1);
+
+      // V4: Semantic dedup — check if a very similar memory already exists
+      const embedding = await generateEmbedding(content);
+      const { data: similar } = await supabase.rpc('find_similar_memory', {
+        target_user_id: userId,
+        query_embedding: embedding,
+        similarity_threshold: 0.92,
+      });
+
+      if (similar && similar.length > 0) {
+        // Update existing memory's confidence if the new one is higher
+        const existing = similar[0];
+        if (confidence > existing.confidence) {
+          await supabase
+            .from('memories')
+            .update({ confidence, content })
+            .eq('id', existing.id);
+        }
+        // Skip inserting — it's a duplicate
+        continue;
+      }
+
+      // No duplicate found — insert new memory
+      const { data: newMemory } = await supabase
+        .from('memories')
+        .insert({ user_id: userId, type, content, confidence })
+        .select('id')
+        .single();
+
+      // Also embed the memory for future dedup and RAG
+      await supabase.from('embeddings').insert({
+        user_id: userId,
+        source_type: 'fact',
+        source_id: newMemory?.id || null,
+        content,
+        embedding,
+        metadata: { memory_type: type, is_active: true },
+      });
     }
   } catch (error) {
     Sentry.captureException(error, {

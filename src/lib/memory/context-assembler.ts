@@ -1,140 +1,130 @@
-// ============================================================
-// Context Assembler — Layer 3 of 7-layer memory system
-// Builds the final messages array with strict token budgets
-//
-// KEY DESIGN: Receives only the last 5 messages as direct history.
-// RAG context (from Layer 2) fills in relevant older context.
-// Rolling summary (from Layer 6) provides high-level continuity.
-// This 3-source approach keeps token usage low while maintaining
-// full conversation awareness.
-// ============================================================
+import type { TemperaturedResult } from './rag-pipeline';
+import { estimateInformationDensity, estimateTokens } from './token-density';
 
-import { TOKEN_BUDGETS, type ModelId } from '@/lib/utils/constants';
-import { estimateTokens } from '@/lib/utils/tokens';
+// --- Temperature-Based Injection ---
+function injectByTemperatureAndDensity(memories: TemperaturedResult[], budget: number): string {
+  const sortByDensity = (arr: TemperaturedResult[]) =>
+    [...arr].sort((a, b) => estimateInformationDensity(b.content) - estimateInformationDensity(a.content));
 
-interface AssembleParams {
-  model: string;
-  userProfile: {
-    name?: string | null;
-    language?: string;
-    expertise?: string;
-  } | null;
-  ragContext: string;
-  messages: Array<{ role: string; content: string }>;
-  rollingSummary?: string | null;
-  language: string;
-}
+  const hot = sortByDensity(memories.filter(m => m.temperature === 'hot'));
+  const warm = sortByDensity(memories.filter(m => m.temperature === 'warm'));
+  const cold = sortByDensity(memories.filter(m => m.temperature === 'cold'));
 
-interface AssembledContext {
-  systemPrompt: string;
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
-}
-
-export function assembleContext(params: AssembleParams): AssembledContext {
-  const budget = TOKEN_BUDGETS[params.model as ModelId] ?? TOKEN_BUDGETS['gemini-3.1-pro'];
-
-  const systemPrompt = buildSystemPrompt(
-    params.userProfile,
-    params.ragContext,
-    params.language,
-    budget.system,
-    budget.rag
-  );
-
-  const assembledMessages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
-
-  // Layer 6: Rolling summary provides high-level conversation continuity
-  // This is especially important now that we only send 5 recent messages
-  if (params.rollingSummary) {
-    assembledMessages.push(
-      { role: 'user', content: `[Previous conversation context]: ${params.rollingSummary}` },
-      { role: 'assistant', content: 'I have the context from our earlier conversation. Let\'s continue.' }
-    );
-  }
-
-  // Add recent messages (already limited to ~5 by route.ts)
-  // trimToTokenBudget is a safety net for very long individual messages
-  const recentMessages = trimToTokenBudget(params.messages, budget.history);
-  assembledMessages.push(...recentMessages);
-
-  return { systemPrompt, messages: assembledMessages };
-}
-
-function buildSystemPrompt(
-  userProfile: AssembleParams['userProfile'],
-  ragContext: string,
-  language: string,
-  systemBudget: number,
-  ragBudget: number
-): string {
+  let used = 0;
   const parts: string[] = [];
 
-  // Core identity
-  parts.push(
-    'You are MultiChat AI, a helpful multi-model AI assistant.',
-    'You provide accurate, clear, and well-structured responses.',
-    'Use markdown formatting when appropriate (code blocks, lists, headers).',
-    'For code: always specify the language in code blocks.',
-    'Be concise but thorough.'
+  for (const m of hot) {
+    const t = estimateTokens(m.content);
+    if (used + t > budget * 0.6) break;
+    parts.push(`[ Relevant Memory ] ${m.content}`);
+    used += t;
+  }
+  for (const m of warm) {
+    const t = estimateTokens(m.content);
+    if (used + t > budget * 0.85) break;
+    parts.push(`[ Related Context ] ${m.content}`);
+    used += t;
+  }
+  for (const m of cold) {
+    const t = estimateTokens(m.content);
+    if (used + t > budget) break;
+    parts.push(`[ Background ] ${m.content}`);
+    used += t;
+  }
+
+  return parts.join('\n\n');
+}
+
+// --- Adaptive Window ---
+function determineWindowSize(classification: any, ragResultCount: number): number {
+  if (classification.workingMemoryPhase === 'debugging') return 8;
+  if (classification.workingMemoryPhase === 'implementing') return 6;
+  if (ragResultCount >= 5) return 3;
+  if (classification.complexity === 'high') return 7;
+  if (classification.intent === 'code') return 7;
+  if (classification.intent === 'chitchat') return 2;
+  return 5;
+}
+
+function smartTrimMessages(messages: any[], windowSize: number): any[] {
+  if (messages.length <= windowSize) return messages;
+  const recent = messages.slice(-windowSize);
+  // Keep important older messages (with attachments or code blocks or long content)
+  const importantOlder = messages.slice(0, -windowSize).filter(m =>
+    m.attachments?.length > 0 || m.content?.includes('```') || (m.content?.length || 0) > 1000
   );
+  return [...importantOlder.slice(-2), ...recent];
+}
 
-  // Language instruction
-  if (language && language !== 'auto') {
-    const langNames: Record<string, string> = {
-      he: 'Hebrew', en: 'English', ar: 'Arabic',
-    };
-    parts.push(`Respond in ${langNames[language] || language}.`);
-  } else {
-    parts.push('Respond in the same language as the user\'s message.');
+// --- Main Assembler ---
+export function assembleContext(params: {
+  model: string;
+  userProfile: any;
+  ragContext: string;
+  temperaturedResults: TemperaturedResult[];
+  messages: any[];
+  workingMemory: any;
+  documentRegistry: any[];
+  structuredSummary: any;
+  classification: any;
+  language: string;
+}) {
+  const BUDGETS: Record<string, { system: number; rag: number; history: number }> = {
+    'gemini-3.1-pro': { system: 5000, rag: 5000, history: 50000 },
+    'gemini-3-flash': { system: 3000, rag: 3000, history: 30000 },
+    'gpt-5.1': { system: 5000, rag: 5000, history: 30000 },
+    'gpt-5-mini': { system: 3000, rag: 3000, history: 20000 },
+    'glm-5': { system: 5000, rag: 5000, history: 30000 },
+  };
+
+  const budget = BUDGETS[params.model] || BUDGETS['gemini-3.1-pro'];
+
+  // 1. STABLE PREFIX (Cacheable by Gemini/OpenAI)
+  let systemPrompt = `You are a highly capable AI assistant. Respond in the user's language (${params.language}).`;
+
+  if (params.userProfile?.expertise && params.userProfile.expertise !== 'general') {
+    systemPrompt += `\n\nUser Expertise: ${params.userProfile.expertise}`;
   }
 
-  // User personalization
-  if (userProfile) {
-    if (userProfile.name) parts.push(`The user's name is ${userProfile.name}.`);
-    if (userProfile.expertise && userProfile.expertise !== 'general') {
-      parts.push(`The user's expertise level: ${userProfile.expertise}.`);
-    }
+  if (params.userProfile?.preferences && Object.keys(params.userProfile.preferences).length > 0) {
+    systemPrompt += `\nUser Preferences: ${JSON.stringify(params.userProfile.preferences)}`;
   }
 
-  // RAG context — the key source for older conversation information
-  if (ragContext) {
-    const trimmedRAG = ragContext.slice(0, ragBudget * 4); // approx chars
-    parts.push(
-      '\n--- RETRIEVED CONTEXT (from memory & past messages) ---',
-      trimmedRAG,
-      '--- END CONTEXT ---',
-      'Use this context naturally when relevant. Do not mention that you retrieved it from memory.'
+  if (params.documentRegistry?.length > 0) {
+    systemPrompt += '\n\n📎 Documents in this conversation:\n';
+    params.documentRegistry.forEach((d: any) => {
+      systemPrompt += `- "${d.filename}" (${d.chunk_count} chunks): ${d.summary}\n`;
+    });
+  }
+
+  if (params.workingMemory?.current_task) {
+    const wm = params.workingMemory;
+    systemPrompt += `\n\n🎯 Current Task Context`;
+    systemPrompt += `\nTask: ${wm.current_task}`;
+    if (wm.sub_tasks?.length > 0) systemPrompt += `\nSub-tasks: ${wm.sub_tasks.join(', ')}`;
+    systemPrompt += `\nPhase: ${wm.phase}`;
+    if (wm.active_entities?.length > 0) systemPrompt += `\nActive entities: ${wm.active_entities.join(', ')}`;
+    if (wm.last_decision) systemPrompt += `\nLast decision: ${wm.last_decision}`;
+  }
+
+  if (params.structuredSummary?.summary) {
+    systemPrompt += `\n\n📜 Conversation Summary\n${params.structuredSummary.summary}`;
+  }
+
+  // 2. VARIABLE SUFFIX
+  const assembledMessages: any[] = [];
+
+  const ragText = injectByTemperatureAndDensity(params.temperaturedResults, budget.rag);
+  if (ragText) {
+    assembledMessages.push(
+      { role: 'user', content: `[Relevant context from memory]:\n${ragText}` },
+      { role: 'assistant', content: 'I have this context available. Let me use it to help you.' }
     );
   }
 
-  const full = parts.join('\n');
-  // Trim to system budget
-  return full.slice(0, systemBudget * 4);
-}
+  const windowSize = determineWindowSize(params.classification, params.temperaturedResults.length);
+  const trimmedMessages = smartTrimMessages(params.messages, windowSize);
+  assembledMessages.push(...trimmedMessages);
 
-function trimToTokenBudget(
-  messages: Array<{ role: string; content: string }>,
-  maxTokens: number
-): Array<{ role: 'user' | 'assistant' | 'system'; content: string }> {
-  // Always include at least the last message
-  if (messages.length === 0) return [];
-
-  const result: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
-  let totalTokens = 0;
-
-  // Work backwards from most recent
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    const tokens = estimateTokens(msg.content) + 4;
-
-    if (totalTokens + tokens > maxTokens && result.length > 0) break;
-
-    result.unshift({
-      role: msg.role as 'user' | 'assistant' | 'system',
-      content: msg.content,
-    });
-    totalTokens += tokens;
-  }
-
-  return result;
+  return { systemPrompt, messages: assembledMessages };
 }

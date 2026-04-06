@@ -1,440 +1,262 @@
-// ============================================================
-// Main SSE Streaming Chat Endpoint — orchestrates all 7 layers
-// POST /api/chat
-// Features: Arcjet rate limiting, Zod validation, AbortController,
-// heartbeat, Sentry capture, usage logging, smart routing
-// ============================================================
-
 import { NextRequest } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
-import { classifyIntent, routeByComplexity } from '@/lib/ai/classifier';
+import { createServerClient } from '@/lib/supabase/server';
+import { classifyIntent } from '@/lib/ai/classifier';
 import { retrieveMemories } from '@/lib/memory/rag-pipeline';
 import { assembleContext } from '@/lib/memory/context-assembler';
-import { streamGPT } from '@/lib/ai/openai';
-import { streamGemini } from '@/lib/ai/gemini';
-import { streamGLM } from '@/lib/ai/glm';
-import { generateImage } from '@/lib/ai/gemini-image';
-import { generateRollingSummary, generateTitle } from '@/lib/memory/rolling-summary';
-import { storeMessageEmbedding } from '@/lib/memory/embed-store';
+import { processUploadedDocument } from '@/lib/memory/document-processor';
+import { updateRollingSummary } from '@/lib/memory/rolling-summary';
+import { updateWorkingMemory } from '@/lib/memory/working-memory';
+import { updateFingerprint } from '@/lib/memory/conversation-fingerprint';
+import { checkAndInvalidateMemories } from '@/lib/memory/invalidation';
+import { detectAntiMemory } from '@/lib/memory/anti-memory';
 import { extractMemories } from '@/lib/memory/extract-memories';
-import { ChatMessageSchema } from '@/lib/security/validate';
+import { generateEmbedding } from '@/lib/ai/embeddings';
+import { streamGPT, streamGemini, streamGLM } from '@/lib/ai/model-streamers';
+import { generateImage } from '@/lib/ai/gemini-image';
+import { checkRateLimit } from '@/lib/security/rate-limit';
 import * as Sentry from '@sentry/nextjs';
-import { z } from 'zod';
-import pdfParse from 'pdf-parse-new';
-
-async function extractPdfText(base64Data: string): Promise<string> {
-  const buffer = Buffer.from(base64Data, 'base64');
-  const result = await pdfParse(buffer);
-  return result.text.slice(0, 8000);
-}
-
-export const runtime = 'nodejs';
-export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
-  // ═══ SECURITY: Input Validation (Zod) ═══
-  let body;
-  try {
-    const raw = await req.json();
-    body = ChatMessageSchema.parse(raw);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      console.error('[Zod Validation]', JSON.stringify(error.issues, null, 2));
-      return new Response(
-        JSON.stringify({ error: 'Invalid input', details: error.issues }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-    console.error('[Chat API] Parse error:', error);
-    return new Response('Bad request', { status: 400 });
-  }
+  // Rate limit check
+  const rateLimit = await checkRateLimit(req);
+  if (!rateLimit.allowed) return new Response('Rate limit exceeded', { status: 429 });
 
-  const { conversationId, model, attachments } = body;
-  // If user sends only attachments with no text, provide a default prompt
-  const message = body.message || (attachments?.length ? 'Analyze the attached file' : '');
-  if (!message && !attachments?.length) {
-    return new Response(
-      JSON.stringify({ error: 'Message or attachment required' }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } }
-    );
-  }
-  const supabase = await createClient();
+  const { message, conversationId, model, attachments } = await req.json();
+  if (!message || !conversationId) return new Response('Missing fields', { status: 400 });
 
-  // Get authenticated user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const supabase = await createServerClient();
+  const { data: { user } } = await supabase.auth.getUser();
   if (!user) return new Response('Unauthorized', { status: 401 });
 
-  // ═══ SECURITY: Daily message limit ═══
-  const { data: userProfile } = await supabase
-    .from('users')
+  // Daily message limit
+  const { data: profile } = await supabase.from('users').select('*').eq('id', user.id).single();
+  if (profile?.messages_today >= profile?.daily_message_limit) {
+    return new Response('Daily limit reached', { status: 429 });
+  }
+  await supabase.from('users').update({ messages_today: (profile?.messages_today || 0) + 1 }).eq('id', user.id);
+
+  // ═══ LAYER 0: INVALIDATION ═══
+  // Uses dedicated module — checks for "forget/ignore" patterns and deactivates related memories
+  await checkAndInvalidateMemories(user.id, message, conversationId);
+
+  // ═══ LAYER 1: CLASSIFY ═══
+  const hasImage = attachments?.some((a: any) => a.type?.startsWith('image/'));
+  const classification = await classifyIntent(message, model, hasImage);
+
+  // IMAGE GENERATION OVERRIDE
+  if (classification.routeTo === 'gemini-3.1-flash-image') {
+    const img = await generateImage(message);
+    await supabase.from('messages').insert({
+      conversation_id: conversationId, role: 'user', content: message, model: classification.routeTo,
+    });
+    await supabase.from('messages').insert({
+      conversation_id: conversationId, role: 'assistant', content: img.revisedPrompt,
+      model: classification.routeTo,
+      attachments: [{ type: img.mimeType, data: img.imageBase64, name: 'image.png' }],
+    });
+    return new Response(JSON.stringify({ type: 'image', ...img }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // Actual model to use (classifier decides based on complexity)
+  const actualModel = classification.routeTo;
+
+  // ═══ DOCUMENT PROCESSING ═══
+  const docTypes = [
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'text/plain',
+    'text/markdown',
+  ];
+  const docsToProcess = attachments?.filter((a: any) => docTypes.includes(a.type));
+  if (docsToProcess?.length > 0) {
+    for (const doc of docsToProcess) {
+      await processUploadedDocument(user.id, conversationId, doc, supabase);
+    }
+  }
+
+  // ═══ LAYER 2: RAG (includes pre-embedding) ═══
+  const ragResult = classification.needsRAG
+    ? await retrieveMemories(user.id, message, conversationId, classification)
+    : { context: '', temperaturedResults: [], preEmbeddedId: undefined };
+
+  // ═══ LAYER 3: ASSEMBLE CONTEXT ═══
+  const { data: conversation } = await supabase
+    .from('conversations')
     .select('*')
-    .eq('id', user.id)
+    .eq('id', conversationId)
     .single();
 
-  if (userProfile && userProfile.messages_today >= userProfile.daily_message_limit) {
-    return new Response(
-      JSON.stringify({ error: 'Daily message limit reached' }),
-      { status: 429, headers: { 'Content-Type': 'application/json' } }
-    );
-  }
+  const { data: history } = await supabase
+    .from('messages')
+    .select('role, content, attachments')
+    .eq('conversation_id', conversationId)
+    .order('created_at');
 
-  // Increment message count
-  await supabase
-    .from('users')
-    .update({
-      messages_today: (userProfile?.messages_today || 0) + 1,
-      last_reset_date: new Date().toISOString().split('T')[0],
-    })
-    .eq('id', user.id);
-
-  // ═══ LAYER 1: INPUT PROCESSING + SMART ROUTING ═══
-  const hasImageAttachment = attachments?.some((a) =>
-    a.type?.startsWith('image')
-  );
-
-  // Extract text content from PDF/text attachments and append to message
-  let enrichedMessage = message;
-  if (attachments?.length) {
-    const textParts: string[] = [];
-    for (const att of attachments) {
-      if (!att.data) continue;
-      if (att.type === 'application/pdf') {
-        // Decode base64 PDF and extract text
-        try {
-          const pdfText = await extractPdfText(att.data);
-          if (pdfText.trim()) {
-            textParts.push(`[Attached PDF: ${att.name}]\n${pdfText}`);
-          }
-        } catch (err) {
-          Sentry.captureException(err, { tags: { action: 'pdf_extract' } });
-          textParts.push(`[Attached PDF: ${att.name} — could not extract text]`);
-        }
-      } else if (att.type.startsWith('text/')) {
-        try {
-          const textContent = Buffer.from(att.data, 'base64').toString('utf-8');
-          textParts.push(`[Attached file: ${att.name}]\n${textContent}`);
-        } catch {
-          textParts.push(`[Attached file: ${att.name} — could not read]`);
-        }
-      }
-    }
-    if (textParts.length) {
-      enrichedMessage = `${message}\n\n---\n${textParts.join('\n\n')}`;
-    }
-  }
-
-  const intent = await classifyIntent(enrichedMessage, hasImageAttachment);
-
-  // ═══ SPECIAL ROUTE: Image Generation ═══
-  if (intent.needsImageGeneration) {
-    try {
-      const imageResult = await generateImage(message);
-
-      // Save user message
-      if (conversationId) {
-        await supabase.from('messages').insert({
-          conversation_id: conversationId,
-          role: 'user',
-          content: message,
-          model: 'gemini-3.1-flash-image',
-        });
-        // Save assistant image response
-        await supabase.from('messages').insert({
-          conversation_id: conversationId,
-          role: 'assistant',
-          content: imageResult.revisedPrompt,
-          model: 'gemini-3.1-flash-image',
-          attachments: [
-            {
-              type: imageResult.mimeType,
-              data: imageResult.imageBase64,
-              name: 'generated-image.png',
-            },
-          ],
-        });
-      }
-
-      return new Response(
-        JSON.stringify({
-          type: 'image',
-          image: imageResult.imageBase64,
-          mimeType: imageResult.mimeType,
-          text: imageResult.revisedPrompt,
-        }),
-        { headers: { 'Content-Type': 'application/json' } }
-      );
-    } catch (error) {
-      Sentry.captureException(error, { tags: { action: 'image_generation' } });
-      return new Response(
-        JSON.stringify({ error: 'Image generation failed' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-  }
-
-  // Determine actual model (with routing overrides + complexity routing)
-  let actualModel: string;
-  if (intent.routeOverride !== 'none') {
-    // Special routes (image gen, web search, vision) override everything
-    actualModel = intent.routeOverride;
-  } else {
-    // Smart complexity routing: downgrade easy questions, upgrade hard ones
-    actualModel = routeByComplexity(model, intent.complexity);
-  }
-
-  // ═══ LAYER 2: MEMORY RETRIEVAL (RAG) + Reranking ═══
-  // RAG is the primary way to access older conversation context.
-  // Since we only send the last 5 messages directly, RAG retrieves
-  // relevant older messages, facts, and summaries from embeddings.
-  let ragContext = '';
-  if (intent.needsRAG) {
-    try {
-      ragContext = await retrieveMemories(user.id, message, 8, conversationId || undefined);
-    } catch (err) {
-      Sentry.captureException(err, { tags: { action: 'rag_retrieval' } });
-    }
-  }
-
-  // ═══ LAYER 3: CONTEXT ASSEMBLY ═══
-  // KEY DESIGN: Only send the last 5 messages as direct context.
-  // Older context is retrieved via RAG (Layer 2) when needed.
-  // This makes RAG actually useful and reduces token costs dramatically.
-  const RECENT_MESSAGE_LIMIT = 5;
-
-  let conversation = null;
-  let recentHistory: Array<{ role: string; content: string }> = [];
-  let totalMessageCount = 0;
-
-  if (conversationId) {
-    const { data: conv } = await supabase
-      .from('conversations')
-      .select('*')
-      .eq('id', conversationId)
-      .single();
-    conversation = conv;
-    totalMessageCount = conv?.message_count || 0;
-
-    // Only fetch the last N messages — NOT the full history
-    const { data: msgs } = await supabase
-      .from('messages')
-      .select('role, content, content_blocks')
-      .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: false })
-      .limit(RECENT_MESSAGE_LIMIT);
-    // Reverse back to chronological order
-    recentHistory = (msgs || []).reverse();
-
-    // Save user message to DB
-    await supabase.from('messages').insert({
+  // Save user message
+  const { data: userMsg } = await supabase
+    .from('messages')
+    .insert({
       conversation_id: conversationId,
       role: 'user',
       content: message,
       model: actualModel,
       attachments: attachments || [],
-    });
-
-    // Update message count on conversation
-    await supabase
-      .from('conversations')
-      .update({ message_count: totalMessageCount + 1 })
-      .eq('id', conversationId);
-
-    // Embed user message in background (for RAG retrieval)
-    storeMessageEmbedding(user.id, message, conversationId, 'user')
-      .catch((err) => Sentry.captureException(err, { tags: { action: 'embed_user_msg' } }));
-  }
+    })
+    .select('id')
+    .single();
 
   const { systemPrompt, messages: assembledMessages } = assembleContext({
     model: actualModel,
-    userProfile,
-    ragContext,
-    messages: [...recentHistory, { role: 'user', content: enrichedMessage }],
-    rollingSummary: conversation?.summary,
-    language: intent.language,
+    userProfile: profile,
+    ragContext: ragResult.context,
+    temperaturedResults: ragResult.temperaturedResults,
+    messages: [...(history || []), { role: 'user', content: message }],
+    workingMemory: conversation?.working_memory,
+    documentRegistry: conversation?.document_registry,
+    structuredSummary: conversation?.structured_summary,
+    classification,
+    language: classification.language,
   });
 
-  // ═══ LAYER 4: GENERATION (STREAMING) with AbortController ═══
-  const encoder = new TextEncoder();
-  const abortController = new AbortController();
-
-  // Clean up on client disconnect
-  req.signal.addEventListener('abort', () => abortController.abort());
-
+  // ═══ LAYER 4: STREAM ═══
   const stream = new ReadableStream({
     async start(controller) {
+      let fullText = '';
       try {
-        let generator;
-        switch (actualModel) {
-          case 'gpt-5.1':
-          case 'gpt-5-mini':
-            generator = streamGPT({
-              systemPrompt,
-              messages: assembledMessages,
-              model: actualModel,
-              userId: user.id,
-              conversationId: conversationId || undefined,
-              signal: abortController.signal,
-            });
-            break;
-          case 'gemini-3.1-pro':
-          case 'gemini-3-flash':
-            generator = streamGemini({
-              systemPrompt,
-              messages: assembledMessages,
-              model: actualModel,
-              enableSearch: intent.needsInternet,
-              userId: user.id,
-              conversationId: conversationId || undefined,
-              signal: abortController.signal,
-            });
-            break;
-          case 'glm-4.7':
-          case 'glm-4.6':
-            generator = streamGLM({
-              systemPrompt,
-              messages: assembledMessages,
-              model: actualModel as 'glm-4.7' | 'glm-4.6',
-              userId: user.id,
-              conversationId: conversationId || undefined,
-              signal: abortController.signal,
-            });
-            break;
-          default:
-            throw new Error(`Unknown model: ${actualModel}`);
+        const enableSearch = classification.intent === 'web_search';
+        let gen: any;
+        if (['gpt-5.1', 'gpt-5-mini'].includes(actualModel)) {
+          gen = streamGPT({ systemPrompt, messages: assembledMessages, model: actualModel });
+        } else if (actualModel.includes('gemini')) {
+          gen = streamGemini({ systemPrompt, messages: assembledMessages, model: actualModel, enableSearch });
+        } else {
+          gen = streamGLM({ systemPrompt, messages: assembledMessages });
         }
 
-        // Heartbeat to prevent timeout (every 15s)
-        const heartbeatInterval = setInterval(() => {
-          if (!abortController.signal.aborted) {
-            controller.enqueue(encoder.encode(': heartbeat\n\n'));
-          }
-        }, 15000);
-
-        // Send routing override info if applicable
-        if (intent.routeOverride !== 'none') {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ routeOverride: actualModel })}\n\n`
-            )
-          );
-        }
-
-        for await (const event of generator) {
-          if (abortController.signal.aborted) break;
-
+        for await (const event of gen) {
           if (event.type === 'text') {
+            fullText += event.text;
             controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({ text: event.text })}\n\n`
-              )
+              new TextEncoder().encode(`data: ${JSON.stringify({ text: event.text })}\n\n`)
             );
-          } else if (event.type === 'error') {
-            console.error('[Model Error]', event.text);
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({ error: event.text })}\n\n`
-              )
-            );
-          } else if (event.type === 'done') {
-            clearInterval(heartbeatInterval);
+          }
 
-            // ═══ LAYER 5: POST-PROCESSING ═══
-            if (conversationId) {
-              // Save assistant message
-              await supabase.from('messages').insert({
+          if (event.type === 'done') {
+            controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+
+            // ═══ LAYER 5: POST-PROCESSING (async, non-blocking) ═══
+
+            // 5.1: Save assistant message
+            const { data: asstMsg } = await supabase
+              .from('messages')
+              .insert({
                 conversation_id: conversationId,
                 role: 'assistant',
-                content: event.fullText || '',
-                content_blocks: (event.contentBlocks ?? null) as import('@/lib/supabase/types').Json,
+                content: fullText,
                 model: actualModel,
-              });
+              })
+              .select('id')
+              .single();
 
-              // Embed assistant message in background (for RAG retrieval)
-              if (event.fullText) {
-                storeMessageEmbedding(user.id, event.fullText, conversationId, 'assistant')
-                  .catch((err) => Sentry.captureException(err, { tags: { action: 'embed_assistant_msg' } }));
-              }
-
-              // Usage logging
-              if (event.usage) {
-                await supabase
-                  .from('usage_logs')
-                  .insert({
-                    user_id: user.id,
-                    model: actualModel,
-                    input_tokens: event.usage.inputTokens,
-                    output_tokens: event.usage.outputTokens,
-                    cost_usd: event.usage.cost,
-                    endpoint: 'chat',
-                  })
-                  .then(() => {}); // non-critical, fire and forget
-              }
-
-              // Rolling summary every 10 messages
-              const messageCount = totalMessageCount + 2;
-              if (messageCount > 12 && messageCount % 10 === 0) {
-                generateRollingSummary(
-                  conversation?.summary,
-                  recentHistory.slice(-5),
-                  message,
-                  event.fullText || ''
-                )
-                  .then(async (summary) => {
-                    await supabase
-                      .from('conversations')
-                      .update({ summary })
-                      .eq('id', conversationId);
-                  })
-                  .catch((err) => Sentry.captureException(err));
-              }
-
-              // Extract memories every 5 messages (fire and forget)
-              if (messageCount > 0 && messageCount % 5 === 0 && event.fullText) {
-                extractMemories(user.id, message, event.fullText)
-                  .catch((err) => Sentry.captureException(err, { tags: { action: 'extract_memories' } }));
-              }
-
-              // Auto-generate title for new conversations + update model
-              if (totalMessageCount === 0) {
-                generateTitle(message, event.fullText || '')
-                  .then(async (title) => {
-                    await supabase
-                      .from('conversations')
-                      .update({
-                        title,
-                        topic: intent.mainTopic,
-                        model: actualModel,
-                      })
-                      .eq('id', conversationId);
-                  })
-                  .catch((err) => Sentry.captureException(err));
-              }
+            // 5.2: Commit pre-embed — update temp embedding to point to the user message
+            if (ragResult.preEmbeddedId && userMsg?.id) {
+              await supabase
+                .from('embeddings')
+                .update({
+                  source_id: userMsg.id,
+                  metadata: {
+                    conversation_id: conversationId,
+                    is_current_message: false,
+                    is_active: true,
+                    role: 'user',
+                    importance: 0.5,
+                  },
+                })
+                .eq('id', ragResult.preEmbeddedId);
             }
 
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({ done: true, usage: event.usage })}\n\n`
-              )
+            // 5.3: Embed assistant response
+            if (asstMsg?.id) {
+              const emb = await generateEmbedding(fullText);
+              await supabase.from('embeddings').insert({
+                user_id: user.id,
+                source_type: 'message',
+                source_id: asstMsg.id,
+                content: fullText.slice(0, 8000),
+                embedding: emb,
+                metadata: {
+                  conversation_id: conversationId,
+                  is_active: true,
+                  role: 'assistant',
+                  importance: 0.5,
+                },
+              });
+            }
+
+            // Async fire-and-forget post-processing
+            const msgCount = (history?.length || 0) + 2;
+
+            // 5.4: Working memory update (every 3 messages, or for code/analysis)
+            if (msgCount % 3 === 0 || classification.intent === 'code' || classification.intent === 'analysis') {
+              updateWorkingMemory(conversationId, message, fullText, classification.intent).catch(
+                (err) => console.error('[Post] Working memory failed:', err)
+              );
+            }
+
+            // 5.5: Incremental summary (every 10 messages after 12)
+            if (msgCount > 12 && msgCount % 10 === 0) {
+              const recentForSummary = [
+                ...((history || []).slice(-10)),
+                { role: 'user', content: message },
+                { role: 'assistant', content: fullText },
+              ];
+              updateRollingSummary(
+                conversationId,
+                conversation?.structured_summary,
+                recentForSummary,
+                supabase
+              ).catch((err) => console.error('[Post] Summary failed:', err));
+            }
+
+            // 5.6: Anti-memory detection (check for rejections/corrections)
+            detectAntiMemory(user.id, conversationId, message, fullText).catch(
+              (err) => console.error('[Post] Anti-memory failed:', err)
             );
+
+            // 5.7: Extract memories (every 5 messages)
+            if (msgCount % 5 === 0) {
+              extractMemories(user.id, message, fullText).catch(
+                (err) => console.error('[Post] Extract memories failed:', err)
+              );
+            }
+
+            // 5.8: Conversation fingerprint (every 20 messages)
+            if (msgCount % 20 === 0) {
+              updateFingerprint(conversationId, user.id).catch(
+                (err) => console.error('[Post] Fingerprint failed:', err)
+              );
+            }
+
+            // 5.9: Auto-title on first exchange
+            if (msgCount === 2) {
+              const title = fullText.slice(0, 50).replace(/\n/g, ' ');
+              await supabase
+                .from('conversations')
+                .update({ title, topic: classification.mainTopic })
+                .eq('id', conversationId);
+            }
           }
         }
-
-        clearInterval(heartbeatInterval);
-      } catch (error) {
-        console.error('[Chat Stream Error]', error instanceof Error ? error.stack : error);
-        Sentry.captureException(error, {
-          tags: { model: actualModel, action: 'stream' },
-          extra: { conversationId, messageLength: message.length },
-        });
+      } catch (err) {
+        Sentry.captureException(err);
         controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({ error: 'An error occurred. Please try again.' })}\n\n`
-          )
+          new TextEncoder().encode(`data: ${JSON.stringify({ error: 'Generation failed' })}\n\n`)
         );
+      } finally {
+        controller.close();
       }
-      controller.close();
     },
   });
 
@@ -443,7 +265,6 @@ export async function POST(req: NextRequest) {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
     },
   });
 }

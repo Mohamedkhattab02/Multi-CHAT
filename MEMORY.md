@@ -93,7 +93,7 @@ User Message
 **Complexity routing:**
 - `low` → downgrade model (e.g., GPT 5.1 → gpt-5-mini) — saves cost
 - `high` → upgrade model (e.g., gpt-5-mini → GPT 5.1) — better quality
-- `medium` → keep user's selected model
+- `medium` → downgrade model - saves cost
 
 ---
 

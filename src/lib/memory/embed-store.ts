@@ -13,6 +13,7 @@ import { generateEmbedding } from '@/lib/ai/embeddings';
  */
 export async function storeMessageEmbedding(
   userId: string,
+  messageId: string,
   content: string,
   conversationId: string,
   role: 'user' | 'assistant'
@@ -26,12 +27,14 @@ export async function storeMessageEmbedding(
   await supabase.from('embeddings').insert({
     user_id: userId,
     source_type: 'message',
-    source_id: conversationId,
-    content: content.slice(0, 8000), // match embedding input limit
+    source_id: messageId,
+    content: content.slice(0, 8000),
     embedding,
     metadata: {
       role,
       conversation_id: conversationId,
+      is_active: true,
+      importance: 0.5,
     },
   });
 }
