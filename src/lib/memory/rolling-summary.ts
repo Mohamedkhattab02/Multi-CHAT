@@ -10,6 +10,40 @@ import * as Sentry from '@sentry/nextjs';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
+/**
+ * Safely parse JSON that may be truncated by the model.
+ * Attempts to repair common truncation issues before giving up.
+ */
+function safeJsonParse<T>(text: string, fallback: T): T {
+  let cleaned = text.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // ignore
+  }
+
+  try {
+    let repaired = cleaned.replace(/,\s*"[^"]*$/, '');
+    repaired = repaired.replace(/,\s*$/, '');
+
+    const stack: string[] = [];
+    for (const ch of repaired) {
+      if (ch === '{') stack.push('}');
+      else if (ch === '[') stack.push(']');
+      else if (ch === '}' || ch === ']') stack.pop();
+    }
+    repaired += stack.reverse().join('');
+
+    return JSON.parse(repaired);
+  } catch {
+    return fallback;
+  }
+}
+
 export interface StructuredSummary {
   decisions: string[];
   technical: string[];
@@ -131,10 +165,10 @@ Rules:
 - open_threads CAN be removed if explicitly resolved
 - Only update narrative if the conversation arc meaningfully shifted
 - Return {} if nothing changed`,
-      800
+      1200
     );
 
-    const patch: SummaryPatch = JSON.parse(patchText || '{}');
+    const patch: SummaryPatch = safeJsonParse<SummaryPatch>(patchText || '{}', {});
     const updated = applyPatch(current, patch);
 
     // Generate plain text version for backward compatibility

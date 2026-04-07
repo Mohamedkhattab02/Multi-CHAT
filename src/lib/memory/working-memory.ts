@@ -11,6 +11,52 @@ import * as Sentry from '@sentry/nextjs';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
+/**
+ * Safely parse JSON that may be truncated by the model.
+ * Attempts to repair common truncation issues before giving up.
+ */
+function safeJsonParse<T>(text: string, fallback: T): T {
+  // Strip markdown code fences if present
+  let cleaned = text.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+  }
+
+  // First try: parse as-is
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // ignore
+  }
+
+  // Second try: truncated JSON — attempt to close open structures
+  try {
+    // Remove trailing incomplete string (e.g., `"some truncated tex`)
+    let repaired = cleaned.replace(/,\s*"[^"]*$/, '');   // trailing incomplete key-value
+    repaired = repaired.replace(/,\s*$/, '');              // trailing comma
+
+    // Close any open brackets/braces
+    const opens = (repaired.match(/[{\[]/g) || []).length;
+    const closes = (repaired.match(/[}\]]/g) || []).length;
+    const diff = opens - closes;
+    if (diff > 0) {
+      // Walk backwards through open chars to close in correct order
+      const stack: string[] = [];
+      for (const ch of repaired) {
+        if (ch === '{') stack.push('}');
+        else if (ch === '[') stack.push(']');
+        else if (ch === '}' || ch === ']') stack.pop();
+      }
+      repaired += stack.reverse().join('');
+    }
+
+    return JSON.parse(repaired);
+  } catch {
+    // Give up — return fallback
+    return fallback;
+  }
+}
+
 export interface WorkingMemory {
   current_task: string | null;
   sub_tasks: string[];
@@ -88,7 +134,7 @@ Rules:
           }],
         }],
         generationConfig: {
-          maxOutputTokens: 500,
+          maxOutputTokens: 1024,
           temperature: 0,
           responseMimeType: 'application/json',
         },
@@ -99,9 +145,10 @@ Rules:
 
     const data = await response.json();
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const parsed = safeJsonParse<Partial<WorkingMemory>>(text, {});
     const updated: WorkingMemory = {
       ...DEFAULT_WORKING_MEMORY,
-      ...JSON.parse(text),
+      ...parsed,
       updated_at: new Date().toISOString(),
     };
 

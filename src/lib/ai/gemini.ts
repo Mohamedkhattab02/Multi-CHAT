@@ -7,6 +7,12 @@ import { GoogleGenerativeAI, type GenerateContentStreamResult } from '@google/ge
 import * as Sentry from '@sentry/nextjs';
 import type { StreamEvent } from './openai';
 
+interface ImageAttachment {
+  type: string;
+  data: string;
+  name?: string;
+}
+
 interface StreamGeminiParams {
   systemPrompt: string;
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
@@ -15,6 +21,7 @@ interface StreamGeminiParams {
   userId?: string;
   conversationId?: string;
   signal?: AbortSignal;
+  imageAttachments?: ImageAttachment[];
 }
 
 const MODEL_MAP: Record<string, string> = {
@@ -28,7 +35,7 @@ const COST_PER_M: Record<string, { input: number; output: number }> = {
 };
 
 export async function* streamGemini(params: StreamGeminiParams): AsyncGenerator<StreamEvent> {
-  const { systemPrompt, messages, model, enableSearch = false, signal } = params;
+  const { systemPrompt, messages, model, enableSearch = false, signal, imageAttachments = [] } = params;
 
   const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY!);
 
@@ -66,8 +73,31 @@ export async function* streamGemini(params: StreamGeminiParams): AsyncGenerator<
       history: geminiHistory,
     });
 
+    // Build message parts: text + optional images
+    const messageParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+
+    // Add text part
+    if (lastMessage.content) {
+      messageParts.push({ text: lastMessage.content });
+    }
+
+    // Add image attachments as inlineData
+    for (const img of imageAttachments) {
+      messageParts.push({
+        inlineData: {
+          mimeType: img.type,
+          data: img.data,
+        },
+      });
+    }
+
+    // Fallback: if no parts at all, add empty text
+    if (messageParts.length === 0) {
+      messageParts.push({ text: '' });
+    }
+
     const result: GenerateContentStreamResult = await chat.sendMessageStream(
-      lastMessage.content
+      messageParts
     );
 
     let fullText = '';

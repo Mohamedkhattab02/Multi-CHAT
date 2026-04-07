@@ -1,12 +1,16 @@
 'use client';
 
-import { memo, useMemo } from 'react';
+import { memo, useMemo, lazy, Suspense } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { sanitizeHtmlSync } from '@/lib/security/sanitize';
-import { CodeBlock } from './CodeBlock';
+
+// Lazy-load CodeBlock (pulls in Shiki ~2MB) — only loaded when code blocks appear
+const CodeBlock = lazy(() =>
+  import('./CodeBlock').then((m) => ({ default: m.CodeBlock }))
+);
 
 interface MarkdownRendererProps {
   content: string;
@@ -43,7 +47,11 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
               );
             }
 
-            return <CodeBlock code={codeString} language={match?.[1]} />;
+            return (
+              <Suspense fallback={<pre className="my-3 p-4 rounded-lg bg-[#0d1117] text-gray-200 text-sm overflow-x-auto"><code>{codeString}</code></pre>}>
+                <CodeBlock code={codeString} language={match?.[1]} />
+              </Suspense>
+            );
           },
 
           // Links

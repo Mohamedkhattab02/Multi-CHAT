@@ -1,6 +1,7 @@
 import { requireAuth } from '@/actions/auth';
 import { Sidebar } from '@/components/sidebar/Sidebar';
 import { ErrorBoundary } from '@/components/layout/ErrorBoundary';
+import { GlobalOverlays } from '@/components/layout/GlobalOverlays';
 
 export default async function ChatLayout({
   children,
@@ -18,6 +19,8 @@ export default async function ChatLayout({
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <ErrorBoundary>{children}</ErrorBoundary>
       </main>
+
+      <GlobalOverlays />
     </div>
   );
 }

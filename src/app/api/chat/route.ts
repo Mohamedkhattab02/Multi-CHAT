@@ -388,7 +388,12 @@ export async function POST(req: NextRequest) {
             });
             break;
           case 'gemini-3.1-pro':
-          case 'gemini-3-flash':
+          case 'gemini-3-flash': {
+            // Extract image attachments for Gemini vision
+            const imageAttachments = (attachments || [])
+              .filter(a => a.type?.startsWith('image') && a.data)
+              .map(a => ({ type: a.type, data: a.data!, name: a.name }));
+
             generator = streamGemini({
               systemPrompt,
               messages: assembledMessages,
@@ -397,8 +402,10 @@ export async function POST(req: NextRequest) {
               userId: user.id,
               conversationId: conversationId || undefined,
               signal: abortController.signal,
+              imageAttachments,
             });
             break;
+          }
           case 'glm-4.7':
           case 'glm-4.6':
             generator = streamGLM({
@@ -588,4 +595,3 @@ export async function POST(req: NextRequest) {
     },
   });
 }
-

@@ -1,13 +1,16 @@
 'use client';
 
+import { useEffect, useState, useCallback } from 'react';
 import { useSidebarStore } from '@/lib/store/sidebar-store';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PenSquare, X, PanelLeftClose, PanelLeft } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { ConversationList } from './ConversationList';
+import { FolderList } from './FolderList';
 import { SearchBar } from './SearchBar';
 import { UserMenu } from './UserMenu';
+import type { Folder } from '@/lib/supabase/types';
 
 interface SidebarProps {
   userId: string;
@@ -16,6 +19,22 @@ interface SidebarProps {
 export function Sidebar({ userId }: SidebarProps) {
   const { isOpen, toggle } = useSidebarStore();
   const router = useRouter();
+  const [folders, setFolders] = useState<Folder[]>([]);
+
+  const fetchFolders = useCallback(async () => {
+    const supabase = createClient();
+    const { data } = await supabase
+      .from('folders')
+      .select('*')
+      .eq('user_id', userId)
+      .order('sort_order', { ascending: true });
+
+    if (data) setFolders(data);
+  }, [userId]);
+
+  useEffect(() => {
+    fetchFolders();
+  }, [fetchFolders]);
 
   async function createNewChat() {
     const supabase = createClient();
@@ -31,6 +50,10 @@ export function Sidebar({ userId }: SidebarProps) {
 
     if (data && !error) {
       router.push(`/chat/${data.id}`);
+      // Close sidebar on mobile after creating a chat
+      if (window.innerWidth < 768) {
+        toggle();
+      }
     }
   }
 
@@ -112,9 +135,18 @@ export function Sidebar({ userId }: SidebarProps) {
             </button>
           </div>
 
+          {/* Folders */}
+          {folders.length > 0 && (
+            <FolderList
+              userId={userId}
+              folders={folders}
+              onFoldersChange={fetchFolders}
+            />
+          )}
+
           {/* Conversation list */}
           <div className="flex-1 overflow-hidden">
-            <ConversationList userId={userId} />
+            <ConversationList userId={userId} folders={folders} />
           </div>
 
           {/* User menu */}

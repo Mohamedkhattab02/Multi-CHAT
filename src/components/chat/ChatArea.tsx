@@ -5,12 +5,14 @@ import { type Conversation, type Message } from '@/lib/supabase/types';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { useSidebarStore } from '@/lib/store/sidebar-store';
 import { useChatStore } from '@/lib/store/chat-store';
+import { useUiStore } from '@/lib/store/ui-store';
 import { useMessages } from '@/lib/hooks/use-messages';
 import { useStreaming } from '@/lib/hooks/use-streaming';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { EmptyState } from './EmptyState';
-import { PanelLeft, Share2, MoreHorizontal } from 'lucide-react';
+import { ChatHeaderMenu } from './ChatHeaderMenu';
+import { PanelLeft, Share2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface ChatAreaProps {
@@ -22,6 +24,7 @@ interface ChatAreaProps {
 export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProps) {
   const { isOpen, toggle } = useSidebarStore();
   const { selectedModel, setSelectedModel, setActiveConversation } = useChatStore();
+  const { setShareDialogOpen } = useUiStore();
 
   const model = MODELS[conversation.model as ModelId];
   const modelColor = model?.color ?? '#737373';
@@ -140,17 +143,13 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
         </span>
         <div className="flex items-center gap-1">
           <button
+            onClick={() => setShareDialogOpen(true, conversation.id)}
             className="p-1.5 rounded-lg hover:bg-[var(--secondary)] transition-colors cursor-pointer"
             title="Share"
           >
             <Share2 className="w-4 h-4 text-[var(--muted-foreground)]" />
           </button>
-          <button
-            className="p-1.5 rounded-lg hover:bg-[var(--secondary)] transition-colors cursor-pointer"
-            title="More options"
-          >
-            <MoreHorizontal className="w-4 h-4 text-[var(--muted-foreground)]" />
-          </button>
+          <ChatHeaderMenu conversationId={conversation.id} title={conversation.title} />
         </div>
       </div>
 

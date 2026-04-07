@@ -1521,23 +1521,19 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 ### Phase 4: UI Polish + Features
 34. Install and configure @tanstack/react-query (QueryProvider)
 35. Build sidebar with Framer Motion animations
-36. Build conversation list grouped by date (virtualized)
 37. Add conversation CRUD (create, rename, delete via context menu)
 38. Add conversation star/pin functionality
 39. Add folder system (create, rename, delete folders, drag conversations into folders)
 40. Add cmdk command palette (Ctrl+K: search + commands)
 41. Add conversation search (search titles + message content via Supabase FTS)
-42. Add file upload (images, PDFs, docs → Supabase Storage)
-43. Add voice input button (Web Speech API)
+42. Add file upload (images, PDFs, docs → Supabase Storage)// save to attachments (bucket supabase)
 44. Add shared conversations (generate link, public read-only view, revoke)
-45. Add dark/light mode toggle with next-themes (system preference + manual)
 46. Add mobile responsive layout (overlay sidebar, hamburger menu)
 47. Add code block with shiki syntax highlighting + copy button + language label
 48. Add LaTeX math rendering (KaTeX via remark-math + rehype-katex)
 49. Add export chat as markdown (.md file download)
 50. Add export chat as PDF (@react-pdf/renderer server-side)
 51. Add keyboard shortcuts (via cmdk)
-52. Add message actions on hover (copy, regenerate, delete)
 53. Add Sonner toast notifications
 54. Performance optimization (React.memo, virtual scrolling, lazy loading)
 

@@ -3,6 +3,7 @@
 import type { Conversation, Message } from '@/lib/supabase/types';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { formatDate, formatTime } from '@/lib/utils/format';
+import { MarkdownRenderer } from './MarkdownRenderer';
 import { MessageSquare, Globe } from 'lucide-react';
 
 interface Props {
@@ -66,8 +67,8 @@ export function SharedConversationView({ conversation, messages }: Props) {
                   {(model?.shortName ?? 'AI').charAt(0)}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="rounded-2xl rounded-tl-md px-4 py-3 text-sm bg-[var(--secondary)] text-[var(--foreground)] leading-relaxed">
-                    {msg.content}
+                  <div className="text-sm text-[var(--foreground)] leading-relaxed">
+                    <MarkdownRenderer content={msg.content} />
                   </div>
                   <p className="text-[10px] text-[var(--muted-foreground)] mt-1 pl-1">
                     {formatDate(msg.created_at)} {formatTime(msg.created_at)}
