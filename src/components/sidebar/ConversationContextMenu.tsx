@@ -218,15 +218,18 @@ export function ConversationContextMenu({
                 <AnimatePresence>
                   {showFolderMenu && (
                     <motion.div
-                      initial={{ opacity: 0, x: -4 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -4 }}
-                      className="absolute left-full top-0 ml-1 w-40 rounded-lg border border-[var(--border)] bg-[var(--popover)] shadow-lg py-1 z-50"
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-[var(--border)] bg-[var(--popover)] shadow-lg py-1 z-50 max-h-48 overflow-y-auto"
                     >
                       <button
-                        onClick={() => {
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
                           onMoveToFolder(conversation.id, null);
                           setIsOpen(false);
+                          setShowFolderMenu(false);
                         }}
                         className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--accent)] transition-colors cursor-pointer text-[var(--muted-foreground)]"
                       >
@@ -235,9 +238,12 @@ export function ConversationContextMenu({
                       {folders.map((f) => (
                         <button
                           key={f.id}
-                          onClick={() => {
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
                             onMoveToFolder(conversation.id, f.id);
                             setIsOpen(false);
+                            setShowFolderMenu(false);
                           }}
                           className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--accent)] transition-colors cursor-pointer ${
                             conversation.folder_id === f.id ? 'text-[var(--primary)] font-medium' : ''

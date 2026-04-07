@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
-import { Send, Paperclip, X, Image as ImageIcon, FileText } from 'lucide-react';
+import { Send, Paperclip, X, Image as ImageIcon, FileText, FileSpreadsheet, File, Eye } from 'lucide-react';
 import { ModelSelector } from './ModelSelector';
 import { VoiceInput } from './VoiceInput';
 import { MAX_FILE_SIZE, MAX_ATTACHMENTS, type ModelId } from '@/lib/utils/constants';
@@ -16,6 +16,12 @@ interface Attachment {
   type: string;
   name: string;
   size: number;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 interface ChatInputProps {
@@ -34,6 +40,7 @@ export function ChatInput({
   disabled = false,
 }: ChatInputProps) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const editor = useEditor({
@@ -142,7 +149,8 @@ export function ChatInput({
             {attachments.map((att, i) => (
               <div
                 key={i}
-                className="relative group flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--secondary)] text-sm"
+                className="relative group flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--secondary)] text-sm cursor-pointer hover:border-[var(--ring)] transition-colors"
+                onClick={() => setPreviewAttachment(att)}
               >
                 {att.preview ? (
                   <img
@@ -152,20 +160,98 @@ export function ChatInput({
                   />
                 ) : att.type.startsWith('image') ? (
                   <ImageIcon className="w-4 h-4 text-[var(--muted-foreground)]" />
-                ) : (
+                ) : att.type.includes('spreadsheet') || att.type.includes('excel') || att.type === 'text/csv' ? (
+                  <FileSpreadsheet className="w-4 h-4 text-[var(--muted-foreground)]" />
+                ) : att.type.includes('word') || att.type === 'application/pdf' || att.type.startsWith('text/') ? (
                   <FileText className="w-4 h-4 text-[var(--muted-foreground)]" />
+                ) : (
+                  <File className="w-4 h-4 text-[var(--muted-foreground)]" />
                 )}
-                <span className="text-xs text-[var(--foreground)] truncate max-w-[120px]">
-                  {att.name}
-                </span>
+                <div className="flex flex-col min-w-0">
+                  <span className="text-xs text-[var(--foreground)] truncate max-w-[120px]">
+                    {att.name}
+                  </span>
+                  <span className="text-[10px] text-[var(--muted-foreground)]">
+                    {formatSize(att.size)}
+                  </span>
+                </div>
+                <Eye className="w-3 h-3 text-[var(--muted-foreground)] opacity-0 group-hover:opacity-100 transition-opacity" />
                 <button
-                  onClick={() => removeAttachment(i)}
+                  onClick={(e) => { e.stopPropagation(); removeAttachment(i); }}
                   className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-[var(--destructive)] text-white flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
                 >
                   <X className="w-3 h-3" />
                 </button>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Attachment preview modal */}
+        {previewAttachment && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+            onClick={() => setPreviewAttachment(null)}
+          >
+            <div
+              className="relative bg-[var(--card)] rounded-2xl shadow-2xl max-w-[90vw] max-h-[85vh] overflow-hidden border border-[var(--border)]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
+                <div className="flex items-center gap-2 min-w-0">
+                  {previewAttachment.type.startsWith('image') ? (
+                    <ImageIcon className="w-4 h-4 text-[var(--muted-foreground)] flex-shrink-0" />
+                  ) : (
+                    <FileText className="w-4 h-4 text-[var(--muted-foreground)] flex-shrink-0" />
+                  )}
+                  <span className="text-sm font-medium text-[var(--foreground)] truncate">
+                    {previewAttachment.name}
+                  </span>
+                  <span className="text-xs text-[var(--muted-foreground)] flex-shrink-0">
+                    {formatSize(previewAttachment.size)}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setPreviewAttachment(null)}
+                  className="p-1 rounded-lg hover:bg-[var(--secondary)] transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4 text-[var(--muted-foreground)]" />
+                </button>
+              </div>
+              {/* Content */}
+              <div className="p-4 overflow-auto max-h-[calc(85vh-60px)]">
+                {previewAttachment.preview ? (
+                  <img
+                    src={previewAttachment.preview}
+                    alt={previewAttachment.name}
+                    className="max-w-full max-h-[70vh] rounded-lg mx-auto"
+                  />
+                ) : previewAttachment.type === 'application/pdf' ? (
+                  <div className="flex flex-col items-center gap-3 py-8">
+                    <FileText className="w-16 h-16 text-red-500" />
+                    <p className="text-sm font-medium text-[var(--foreground)]">{previewAttachment.name}</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">PDF Document - {formatSize(previewAttachment.size)}</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">Text will be extracted and sent to AI</p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-3 py-8">
+                    {previewAttachment.type.includes('spreadsheet') || previewAttachment.type.includes('excel') || previewAttachment.type === 'text/csv' ? (
+                      <FileSpreadsheet className="w-16 h-16 text-green-500" />
+                    ) : previewAttachment.type.includes('word') ? (
+                      <FileText className="w-16 h-16 text-blue-500" />
+                    ) : previewAttachment.type.includes('presentation') || previewAttachment.type.includes('powerpoint') ? (
+                      <FileText className="w-16 h-16 text-orange-500" />
+                    ) : (
+                      <File className="w-16 h-16 text-[var(--muted-foreground)]" />
+                    )}
+                    <p className="text-sm font-medium text-[var(--foreground)]">{previewAttachment.name}</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">{formatSize(previewAttachment.size)}</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">Content will be extracted and sent to AI</p>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         )}
 
@@ -187,7 +273,7 @@ export function ChatInput({
               ref={fileInputRef}
               type="file"
               multiple
-              accept="image/*,application/pdf,text/plain,text/markdown"
+              accept="image/*,application/pdf,text/plain,text/markdown,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/msword,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/json,application/xml,text/xml,text/html,application/zip,application/x-zip-compressed,application/rtf"
               onChange={handleFileSelect}
               className="hidden"
             />

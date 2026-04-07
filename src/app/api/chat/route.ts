@@ -11,7 +11,7 @@
 // ============================================================
 
 import { NextRequest } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createServiceClient } from '@/lib/supabase/server';
 import { classifyIntent, routeByComplexity } from '@/lib/ai/classifier';
 import { detectAndHandleInvalidation } from '@/lib/memory/invalidation';
 import { retrieveMemories, type RetrievedContext } from '@/lib/memory/rag-pipeline';
@@ -31,6 +31,8 @@ import { ChatMessageSchema } from '@/lib/security/validate';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import pdfParse from 'pdf-parse-new';
+import mammoth from 'mammoth';
+import * as XLSX from 'xlsx';
 
 async function extractPdfText(base64Data: string): Promise<string> {
   const buffer = Buffer.from(base64Data, 'base64');
@@ -55,6 +57,61 @@ async function extractPdfText(base64Data: string): Promise<string> {
   } finally {
     console.warn = originalWarn;
     console.info = originalInfo;
+  }
+}
+
+async function extractDocxText(base64Data: string): Promise<string> {
+  const buffer = Buffer.from(base64Data, 'base64');
+  const result = await mammoth.extractRawText({ buffer });
+  return result.value.slice(0, 8000);
+}
+
+function extractSpreadsheetText(base64Data: string): string {
+  const buffer = Buffer.from(base64Data, 'base64');
+  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const parts: string[] = [];
+  for (const sheetName of workbook.SheetNames.slice(0, 5)) {
+    const sheet = workbook.Sheets[sheetName];
+    const csv = XLSX.utils.sheet_to_csv(sheet);
+    parts.push(`[Sheet: ${sheetName}]\n${csv}`);
+  }
+  return parts.join('\n\n').slice(0, 8000);
+}
+
+async function uploadToSupabaseStorage(
+  userId: string,
+  fileName: string,
+  base64Data: string,
+  mimeType: string
+): Promise<string | null> {
+  try {
+    // Use service client to bypass RLS for storage uploads
+    const serviceClient = createServiceClient();
+    const buffer = Buffer.from(base64Data, 'base64');
+    const filePath = `${userId}/${Date.now()}_${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+
+    const { error } = await serviceClient.storage
+      .from('attachments')
+      .upload(filePath, buffer, {
+        contentType: mimeType,
+        upsert: false,
+      });
+
+    if (error) {
+      console.error('[Storage Upload]', error.message);
+      Sentry.captureException(error, { tags: { action: 'storage_upload' } });
+      return null;
+    }
+
+    const { data: urlData } = serviceClient.storage
+      .from('attachments')
+      .getPublicUrl(filePath);
+
+    return urlData.publicUrl;
+  } catch (err) {
+    console.error('[Storage Upload] Unexpected error:', err);
+    Sentry.captureException(err, { tags: { action: 'storage_upload' } });
+    return null;
   }
 }
 
@@ -129,21 +186,33 @@ export async function POST(req: NextRequest) {
     a.type?.startsWith('image')
   );
 
-  // Extract text content from PDF/text attachments
+  // Extract text content from attachments + upload to Supabase Storage
   let enrichedMessage = message;
   type DocProcessResult = { filename: string; summary: string; chunk_count: number; key_sections: string[] };
   const documentProcessingPromises: Promise<DocProcessResult>[] = [];
+  // Store uploaded file URLs to save in message attachments (instead of base64)
+  const processedAttachments: Array<{ type: string; name: string; url?: string; size?: number }> = [];
 
   if (attachments?.length) {
     const textParts: string[] = [];
     for (const att of attachments) {
       if (!att.data) continue;
+
+      // Upload file to Supabase Storage
+      const fileUrl = await uploadToSupabaseStorage(user.id, att.name || 'file', att.data, att.type);
+      processedAttachments.push({
+        type: att.type,
+        name: att.name || 'file',
+        url: fileUrl || undefined,
+        size: att.size,
+      });
+
+      // Extract text content based on file type
       if (att.type === 'application/pdf') {
         try {
           const pdfText = await extractPdfText(att.data);
           if (pdfText.trim()) {
             textParts.push(`[Attached PDF: ${att.name}]\n${pdfText}`);
-            // V4: Process document with structure-aware chunking
             if (conversationId) {
               documentProcessingPromises.push(
                 processDocument({
@@ -160,11 +229,64 @@ export async function POST(req: NextRequest) {
           Sentry.captureException(err, { tags: { action: 'pdf_extract' } });
           textParts.push(`[Attached PDF: ${att.name} — could not extract text]`);
         }
-      } else if (att.type.startsWith('text/')) {
+      } else if (
+        att.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        att.type === 'application/msword'
+      ) {
+        try {
+          const docxText = await extractDocxText(att.data);
+          if (docxText.trim()) {
+            textParts.push(`[Attached Document: ${att.name}]\n${docxText}`);
+            if (conversationId) {
+              documentProcessingPromises.push(
+                processDocument({
+                  userId: user.id,
+                  conversationId,
+                  fileName: att.name || 'document.docx',
+                  content: docxText,
+                  fileType: 'docx',
+                })
+              );
+            }
+          }
+        } catch (err) {
+          Sentry.captureException(err, { tags: { action: 'docx_extract' } });
+          textParts.push(`[Attached Document: ${att.name} — could not extract text]`);
+        }
+      } else if (
+        att.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+        att.type === 'application/vnd.ms-excel' ||
+        att.type === 'text/csv'
+      ) {
+        try {
+          let sheetText: string;
+          if (att.type === 'text/csv') {
+            sheetText = Buffer.from(att.data, 'base64').toString('utf-8').slice(0, 8000);
+          } else {
+            sheetText = extractSpreadsheetText(att.data);
+          }
+          if (sheetText.trim()) {
+            textParts.push(`[Attached Spreadsheet: ${att.name}]\n${sheetText}`);
+            if (conversationId) {
+              documentProcessingPromises.push(
+                processDocument({
+                  userId: user.id,
+                  conversationId,
+                  fileName: att.name || 'spreadsheet.xlsx',
+                  content: sheetText,
+                  fileType: att.type,
+                })
+              );
+            }
+          }
+        } catch (err) {
+          Sentry.captureException(err, { tags: { action: 'spreadsheet_extract' } });
+          textParts.push(`[Attached Spreadsheet: ${att.name} — could not extract data]`);
+        }
+      } else if (att.type.startsWith('text/') || att.type === 'application/json' || att.type === 'application/xml') {
         try {
           const textContent = Buffer.from(att.data, 'base64').toString('utf-8');
-          textParts.push(`[Attached file: ${att.name}]\n${textContent}`);
-          // V4: Process text documents too
+          textParts.push(`[Attached file: ${att.name}]\n${textContent.slice(0, 8000)}`);
           if (conversationId) {
             documentProcessingPromises.push(
               processDocument({
@@ -179,6 +301,13 @@ export async function POST(req: NextRequest) {
         } catch {
           textParts.push(`[Attached file: ${att.name} — could not read]`);
         }
+      } else if (
+        att.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+        att.type === 'application/vnd.ms-powerpoint'
+      ) {
+        textParts.push(`[Attached Presentation: ${att.name}]`);
+      } else if (!att.type.startsWith('image/')) {
+        textParts.push(`[Attached file: ${att.name}]`);
       }
     }
     if (textParts.length) {
@@ -290,13 +419,13 @@ export async function POST(req: NextRequest) {
       .limit(10);
     recentHistory = (msgs || []).reverse();
 
-    // Save user message to DB
+    // Save user message to DB (with Storage URLs instead of base64)
     await supabase.from('messages').insert({
       conversation_id: conversationId,
       role: 'user',
       content: message,
       model: actualModel,
-      attachments: attachments || [],
+      attachments: processedAttachments.length > 0 ? processedAttachments : [],
     });
   }
 
@@ -544,7 +673,7 @@ export async function POST(req: NextRequest) {
                   .catch(err => Sentry.captureException(err));
               }
 
-              // Auto-generate title for new conversations
+              // Auto-generate title for new conversations and send it back via SSE
               if (totalMessageCount === 0) {
                 generateTitle(message, event.fullText || '')
                   .then(async (title) => {
@@ -556,6 +685,16 @@ export async function POST(req: NextRequest) {
                         model: actualModel,
                       })
                       .eq('id', conversationId);
+                    // Send title update to client
+                    try {
+                      controller.enqueue(
+                        encoder.encode(
+                          `data: ${JSON.stringify({ titleUpdate: title })}\n\n`
+                        )
+                      );
+                    } catch {
+                      // Controller may be closed already
+                    }
                   })
                   .catch(err => Sentry.captureException(err));
               }

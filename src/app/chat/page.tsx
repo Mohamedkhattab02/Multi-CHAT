@@ -18,6 +18,7 @@ export default function NewChatPage() {
   const { selectedModel, setSelectedModel } = useChatStore();
   const { isOpen, toggle } = useSidebarStore();
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<Array<{ type: string; name: string; size: number; preview?: string }>>([]);
 
   const {
     isStreaming,
@@ -35,6 +36,12 @@ export default function NewChatPage() {
       if (!text.trim() && attachments.length === 0) return;
 
       setPendingMessage(text);
+      setPendingAttachments(attachments.map(a => ({
+        type: a.type,
+        name: a.name,
+        size: a.size,
+        preview: a.type.startsWith('image/') ? URL.createObjectURL(a.file) : undefined,
+      })));
 
       try {
         // 1. Create a new conversation
@@ -64,15 +71,10 @@ export default function NewChatPage() {
           return;
         }
 
-        // 2. Convert file attachments
+        // 2. Convert file attachments (all types as base64)
         const serializedAttachments = await Promise.all(
           attachments.map(async (att) => {
-            let data: string | undefined;
-            if (att.type.startsWith('image/') || att.type === 'application/pdf') {
-              data = await fileToBase64(att.file);
-            } else if (att.type.startsWith('text/')) {
-              data = btoa(await att.file.text());
-            }
+            const data = await fileToBase64(att.file);
             return { type: att.type, name: att.name, size: att.size, data };
           })
         );
@@ -128,7 +130,19 @@ export default function NewChatPage() {
                 {/* User message */}
                 <div className="flex justify-end">
                   <div className="max-w-[85%] px-4 py-3 rounded-2xl bg-[var(--primary)] text-[var(--primary-foreground)] text-sm leading-relaxed rounded-br-md">
-                    {pendingMessage}
+                    <div dir="auto">{pendingMessage}</div>
+                    {pendingAttachments.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        {pendingAttachments.map((att, i) => (
+                          <div key={i} className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/10 text-xs">
+                            {att.preview ? (
+                              <img src={att.preview} alt={att.name} className="w-8 h-8 rounded object-cover" />
+                            ) : null}
+                            <span className="truncate max-w-[100px]">{att.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
 

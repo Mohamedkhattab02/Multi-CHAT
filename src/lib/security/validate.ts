@@ -41,9 +41,30 @@ export const DeleteConversationSchema = z.object({
   id: z.string().uuid(),
 });
 
+// All supported MIME types for file uploads
+export const SUPPORTED_FILE_TYPES = [
+  // Images
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
+  // Documents
+  'application/pdf',
+  'text/plain', 'text/markdown', 'text/csv', 'text/html', 'text/xml',
+  // Office documents
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',       // .xlsx
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation', // .pptx
+  'application/msword',           // .doc
+  'application/vnd.ms-excel',     // .xls
+  'application/vnd.ms-powerpoint', // .ppt
+  'application/rtf',
+  // Data formats
+  'application/json', 'application/xml',
+  // Archives
+  'application/zip', 'application/x-zip-compressed',
+] as const;
+
 export const UploadSchema = z.object({
   fileName: z.string().max(255),
-  fileType: z.enum(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf', 'text/plain', 'text/markdown']),
+  fileType: z.string().max(200),
   fileSize: z.number().max(10 * 1024 * 1024),
 });
 

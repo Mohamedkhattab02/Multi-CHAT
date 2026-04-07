@@ -142,6 +142,17 @@ export function useStreaming() {
 
               if (parsed.done) {
                 // Stream complete — create synthetic messages for immediate UI update
+                // Map attachments to include preview URLs for display
+                const displayAttachments = (attachments || []).map(a => ({
+                  type: a.type,
+                  name: a.name,
+                  size: a.size,
+                  url: a.url,
+                  // For images, create data URL for immediate preview if no storage URL
+                  ...(a.type.startsWith('image/') && a.data && !a.url
+                    ? { data: a.data }
+                    : {}),
+                }));
                 const userMsg: Message = {
                   id: crypto.randomUUID(),
                   conversation_id: conversationId,
@@ -150,7 +161,7 @@ export function useStreaming() {
                   content_blocks: null,
                   model,
                   token_count: null,
-                  attachments: attachments || [],
+                  attachments: displayAttachments,
                   created_at: new Date().toISOString(),
                 };
                 const assistantMsg: Message = {

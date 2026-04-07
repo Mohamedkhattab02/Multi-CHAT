@@ -136,13 +136,11 @@ export function Sidebar({ userId }: SidebarProps) {
           </div>
 
           {/* Folders */}
-          {folders.length > 0 && (
-            <FolderList
-              userId={userId}
-              folders={folders}
-              onFoldersChange={fetchFolders}
-            />
-          )}
+          <FolderList
+            userId={userId}
+            folders={folders}
+            onFoldersChange={fetchFolders}
+          />
 
           {/* Conversation list */}
           <div className="flex-1 overflow-hidden">

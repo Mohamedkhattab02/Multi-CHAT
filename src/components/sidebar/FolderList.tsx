@@ -180,8 +180,11 @@ export function FolderList({ userId, folders, onFoldersChange }: FolderListProps
                 />
               </div>
             ) : (
-              <button
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => setActiveFolder(activeFolder === folder.id ? null : folder.id)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setActiveFolder(activeFolder === folder.id ? null : folder.id); }}
                 className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs transition-all cursor-pointer ${
                   activeFolder === folder.id
                     ? 'bg-[var(--sidebar-active)] text-[var(--foreground)] font-medium'
@@ -242,7 +245,7 @@ export function FolderList({ userId, folders, onFoldersChange }: FolderListProps
                     )}
                   </AnimatePresence>
                 </div>
-              </button>
+              </div>
             )}
           </motion.div>
         ))}

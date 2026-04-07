@@ -1,10 +1,143 @@
 'use client';
 
 import { memo, useState, useCallback } from 'react';
-import { Copy, Check, RefreshCw, Trash2 } from 'lucide-react';
+import { Copy, Check, RefreshCw, Trash2, FileText, FileSpreadsheet, FileImage, File, Download, ExternalLink } from 'lucide-react';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import type { Message } from '@/lib/supabase/types';
+
+interface AttachmentData {
+  type?: string;
+  data?: string;
+  name?: string;
+  url?: string;
+  size?: number;
+}
+
+function getFileIcon(type: string) {
+  if (type.startsWith('image/')) return FileImage;
+  if (type.includes('spreadsheet') || type.includes('excel') || type === 'text/csv') return FileSpreadsheet;
+  if (type.includes('word') || type === 'application/pdf' || type.includes('text/')) return FileText;
+  return File;
+}
+
+function getFileColor(type: string): string {
+  if (type === 'application/pdf') return '#EF4444';
+  if (type.includes('word') || type === 'application/msword') return '#3B82F6';
+  if (type.includes('spreadsheet') || type.includes('excel') || type === 'text/csv') return '#22C55E';
+  if (type.includes('presentation') || type.includes('powerpoint')) return '#F97316';
+  if (type.startsWith('image/')) return '#8B5CF6';
+  if (type === 'application/json') return '#EAB308';
+  return '#6B7280';
+}
+
+function getFileExtension(name: string): string {
+  const ext = name.split('.').pop()?.toUpperCase();
+  return ext || 'FILE';
+}
+
+function formatFileSize(bytes?: number): string {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function AttachmentPreview({ attachment }: { attachment: AttachmentData }) {
+  const [expanded, setExpanded] = useState(false);
+  const isImage = attachment.type?.startsWith('image/');
+  const Icon = getFileIcon(attachment.type || '');
+  const imageUrl = attachment.url || (attachment.data ? `data:${attachment.type};base64,${attachment.data}` : null);
+
+  if (isImage && imageUrl) {
+    return (
+      <div className="mt-2">
+        <img
+          src={imageUrl}
+          alt={attachment.name || 'attachment'}
+          className="max-w-[300px] max-h-[300px] rounded-lg cursor-pointer hover:opacity-90 transition-opacity border border-[var(--border)]"
+          loading="lazy"
+          onClick={() => setExpanded(true)}
+        />
+        {expanded && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm cursor-pointer"
+            onClick={() => setExpanded(false)}
+          >
+            <img
+              src={imageUrl}
+              alt={attachment.name || 'attachment'}
+              className="max-w-[90vw] max-h-[90vh] rounded-lg shadow-2xl"
+            />
+            {attachment.url && (
+              <a
+                href={attachment.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="absolute top-4 right-4 p-2 rounded-full bg-white/20 hover:bg-white/30 transition-colors"
+                title="Open in new tab"
+              >
+                <ExternalLink className="w-5 h-5 text-white" />
+              </a>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Non-image file attachment
+  const fileColor = getFileColor(attachment.type || '');
+  const fileExt = getFileExtension(attachment.name || 'file');
+
+  return (
+    <div className="mt-2">
+      {attachment.url ? (
+        <a
+          href={attachment.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/30 hover:bg-[var(--secondary)]/60 transition-colors max-w-[320px] group/file"
+        >
+          {/* File type badge */}
+          <div
+            className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 text-white text-[10px] font-bold"
+            style={{ backgroundColor: fileColor }}
+          >
+            {fileExt}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-[var(--foreground)] truncate">
+              {attachment.name || 'File'}
+            </p>
+            <p className="text-[10px] text-[var(--muted-foreground)]">
+              {formatFileSize(attachment.size)} &middot; Click to open
+            </p>
+          </div>
+          <ExternalLink className="w-3.5 h-3.5 text-[var(--muted-foreground)] opacity-0 group-hover/file:opacity-100 transition-opacity flex-shrink-0" />
+        </a>
+      ) : (
+        <div className="inline-flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/30 max-w-[320px]">
+          <div
+            className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 text-white text-[10px] font-bold"
+            style={{ backgroundColor: fileColor }}
+          >
+            {fileExt}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-[var(--foreground)] truncate">
+              {attachment.name || 'File'}
+            </p>
+            <p className="text-[10px] text-[var(--muted-foreground)]">
+              {formatFileSize(attachment.size)}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface MessageBubbleProps {
   message: Message;
@@ -31,13 +164,8 @@ export const MessageBubble = memo(function MessageBubble({
 
   const relativeTime = useRelativeTime(message.created_at);
 
-  // Check for generated image in attachments
-  const attachments = (message.attachments || []) as Array<{
-    type?: string;
-    data?: string;
-    name?: string;
-    url?: string;
-  }>;
+  // Parse attachments
+  const attachments = (message.attachments || []) as AttachmentData[];
   const generatedImage = attachments.find(
     (a) => a.type?.startsWith('image') && a.data
   );
@@ -77,18 +205,14 @@ export const MessageBubble = memo(function MessageBubble({
           )}
           <div className="rounded-2xl rounded-br-md px-4 py-3 text-sm bg-[var(--primary)] text-[var(--primary-foreground)] leading-relaxed">
             <div dir="auto">{message.content}</div>
-            {/* Attached images */}
-            {attachments
-              .filter((a) => a.type?.startsWith('image') && a.url)
-              .map((a, i) => (
-                <img
-                  key={i}
-                  src={a.url}
-                  alt={a.name || 'attachment'}
-                  className="max-w-[300px] rounded-lg mt-2"
-                  loading="lazy"
-                />
-              ))}
+            {/* Attachments (images, documents, etc.) */}
+            {attachments.length > 0 && (
+              <div className="flex flex-col gap-1">
+                {attachments.map((a, i) => (
+                  <AttachmentPreview key={i} attachment={a} />
+                ))}
+              </div>
+            )}
           </div>
           <div className="text-[10px] text-[var(--muted-foreground)] mt-1 text-right opacity-0 group-hover:opacity-100 transition-opacity">
             {relativeTime}
@@ -118,17 +242,19 @@ export const MessageBubble = memo(function MessageBubble({
         <div className="text-sm text-[var(--foreground)] leading-relaxed">
           <MarkdownRenderer content={message.content} />
 
-          {/* Generated image */}
-          {generatedImage && (
-            <div className="mt-3">
-              <img
-                src={`data:${generatedImage.type};base64,${generatedImage.data}`}
-                alt={generatedImage.name || 'Generated image'}
-                className="max-w-[400px] rounded-lg border border-[var(--border)]"
-              />
-              <p className="text-xs text-[var(--muted-foreground)] mt-1">
-                Generated by Gemini Flash Image
-              </p>
+          {/* Attachments (generated images, files, etc.) */}
+          {attachments.length > 0 && (
+            <div className="flex flex-col gap-1">
+              {attachments.map((a, i) => (
+                <div key={i}>
+                  <AttachmentPreview attachment={a} />
+                  {a.type?.startsWith('image') && a.data && (
+                    <p className="text-xs text-[var(--muted-foreground)] mt-1">
+                      Generated by Gemini Flash Image
+                    </p>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>

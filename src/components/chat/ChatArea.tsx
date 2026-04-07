@@ -62,15 +62,10 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
     ) => {
       if (!text.trim() && attachments.length === 0) return;
 
-      // Convert file attachments to serializable format
+      // Convert file attachments to serializable format (base64)
       const serializedAttachments = await Promise.all(
         attachments.map(async (att) => {
-          let data: string | undefined;
-          if (att.type.startsWith('image/') || att.type === 'application/pdf') {
-            data = await fileToBase64(att.file);
-          } else if (att.type.startsWith('text/')) {
-            data = btoa(await att.file.text());
-          }
+          const data = await fileToBase64(att.file);
           return {
             type: att.type,
             name: att.name,
@@ -80,14 +75,33 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
         })
       );
 
+      // Immediately show user message (optimistic)
+      const optimisticUserMsg: Message = {
+        id: `optimistic-${Date.now()}`,
+        conversation_id: conversation.id,
+        role: 'user',
+        content: text,
+        content_blocks: null,
+        model: selectedModel,
+        token_count: null,
+        attachments: serializedAttachments.map(a => ({
+          type: a.type,
+          name: a.name,
+          size: a.size,
+        })),
+        created_at: new Date().toISOString(),
+      };
+      addMessages([optimisticUserMsg]);
+
       try {
         await sendMessage({
           message: text,
           conversationId: conversation.id,
           model: selectedModel,
           attachments: serializedAttachments,
-          onMessageSaved: (userMsg, assistantMsg) => {
-            addMessages([userMsg, assistantMsg]);
+          onMessageSaved: (_userMsg, assistantMsg) => {
+            // Only add assistant message — user message was already added optimistically
+            addMessages([assistantMsg]);
             // Refetch from DB to get real IDs and sync state
             setTimeout(() => refetchMessages(), 500);
           },
