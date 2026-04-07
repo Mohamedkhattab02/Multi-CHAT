@@ -165,7 +165,7 @@ Rules:
 - open_threads CAN be removed if explicitly resolved
 - Only update narrative if the conversation arc meaningfully shifted
 - Return {} if nothing changed`,
-      1200
+      4096
     );
 
     const patch: SummaryPatch = safeJsonParse<SummaryPatch>(patchText || '{}', {});
@@ -229,7 +229,7 @@ export async function generateTitle(
           role: 'user',
           parts: [{ text: `User: ${userMessage.slice(0, 200)}\nAssistant: ${assistantResponse.slice(0, 200)}` }],
         }],
-        generationConfig: { maxOutputTokens: 30 },
+        generationConfig: { maxOutputTokens: 2048 },
       }),
     });
 

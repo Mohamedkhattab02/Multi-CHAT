@@ -3,9 +3,10 @@
 // Supports search grounding for real-time data queries
 // ============================================================
 
-import { GoogleGenerativeAI, type GenerateContentStreamResult } from '@google/generative-ai';
+import { GoogleGenerativeAI, type GenerateContentStreamResult, type CachedContent } from '@google/generative-ai';
 import * as Sentry from '@sentry/nextjs';
 import type { StreamEvent } from './openai';
+import { getOrCreateCache } from './gemini-cache';
 
 interface ImageAttachment {
   type: string;
@@ -22,6 +23,7 @@ interface StreamGeminiParams {
   conversationId?: string;
   signal?: AbortSignal;
   imageAttachments?: ImageAttachment[];
+  existingCacheName?: string | null;
 }
 
 const MODEL_MAP: Record<string, string> = {
@@ -35,7 +37,7 @@ const COST_PER_M: Record<string, { input: number; output: number }> = {
 };
 
 export async function* streamGemini(params: StreamGeminiParams): AsyncGenerator<StreamEvent> {
-  const { systemPrompt, messages, model, enableSearch = false, signal, imageAttachments = [] } = params;
+  const { systemPrompt, messages, model, enableSearch = false, signal, imageAttachments = [], existingCacheName = null } = params;
 
   const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY!);
 
@@ -44,16 +46,34 @@ export async function* streamGemini(params: StreamGeminiParams): AsyncGenerator<
     tools.push({ googleSearch: {} });
   }
 
-  const geminiModel = genAI.getGenerativeModel({
-    model: MODEL_MAP[model] || model,
-    systemInstruction: systemPrompt,
-    generationConfig: {
-      maxOutputTokens: model === 'gemini-3.1-pro' ? 8192 : 4096,
-      temperature: 0.7,
-    },
-    // @ts-expect-error -- google search tool typing not yet in SDK
-    tools: tools.length > 0 ? tools : undefined,
-  });
+  // Try to use context caching for large system prompts
+  let cachedContent: CachedContent | null = null;
+  if (params.conversationId && !enableSearch) {
+    cachedContent = await getOrCreateCache({
+      conversationId: params.conversationId,
+      systemPrompt,
+      model,
+      existingCacheName,
+    });
+  }
+
+  const geminiModel = cachedContent
+    ? genAI.getGenerativeModelFromCachedContent(cachedContent, {
+        generationConfig: {
+          maxOutputTokens: model === 'gemini-3.1-pro' ? 8192 : 4096,
+          temperature: 0.7,
+        },
+      })
+    : genAI.getGenerativeModel({
+        model: MODEL_MAP[model] || model,
+        systemInstruction: systemPrompt,
+        generationConfig: {
+          maxOutputTokens: model === 'gemini-3.1-pro' ? 8192 : 4096,
+          temperature: 0.7,
+        },
+        // @ts-expect-error -- google search tool typing not yet in SDK
+        tools: tools.length > 0 ? tools : undefined,
+      });
 
   // Convert messages to Gemini format (alternating user/model)
   const geminiHistory = convertToGeminiHistory(messages.slice(0, -1));

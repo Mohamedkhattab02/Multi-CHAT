@@ -237,6 +237,8 @@ ROUTING RULES:
 - If query asks to generate/create an image → routeOverride:"gemini-3.1-flash-image", needsImageGeneration:true
 - chitchat/greetings → needsRAG:false, complexity:low
 - needsRAG:true if complexity is "high", or medium+code/analysis, or references past conversation/documents
+- IMPORTANT: PDF/document uploads are NOT images. hasImageInput:false for PDFs. Only set hasImageInput:true for actual image files (png, jpg, gif, etc.)
+- IMPORTANT: routeOverride:"gemini-3.1-flash-image" is ONLY for image generation requests, NEVER for document/PDF questions
 
 WORKING MEMORY PHASE:
 - planning: user is designing, brainstorming, choosing approach

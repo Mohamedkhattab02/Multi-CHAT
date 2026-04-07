@@ -37,17 +37,18 @@ import * as XLSX from 'xlsx';
 async function extractPdfText(base64Data: string): Promise<string> {
   const buffer = Buffer.from(base64Data, 'base64');
 
-  // Suppress noisy pdf.js font warnings (TT: CALL empty stack, etc.)
+  // Suppress noisy pdf.js font/page warnings (TT: CALL empty stack, fetchStandardFontData, etc.)
   const originalWarn = console.warn;
   const originalInfo = console.info;
+  const pdfNoisePattern = /TT:|getTextContent|fetchStandardFontData|standardFontDataUrl|page=\d+/;
   console.warn = (...args: unknown[]) => {
     const msg = String(args[0] || '');
-    if (msg.includes('TT:') || msg.includes('getTextContent')) return;
+    if (pdfNoisePattern.test(msg)) return;
     originalWarn.apply(console, args);
   };
   console.info = (...args: unknown[]) => {
     const msg = String(args[0] || '');
-    if (msg.includes('TT:') || msg.includes('getTextContent')) return;
+    if (pdfNoisePattern.test(msg)) return;
     originalInfo.apply(console, args);
   };
 
@@ -443,9 +444,10 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Force RAG when conversation has documents — user may reference them at any time
+  // Run RAG when classifier says so, OR when documents exist AND user references them
+  // Don't force RAG for unrelated general questions just because documents exist
   const hasDocuments = documentRegistry.length > 0 || docResults.some(d => d.chunk_count > 0);
-  const shouldRunRAG = (intent.needsRAG || hasDocuments) && !!conversationId;
+  const shouldRunRAG = (intent.needsRAG || (hasDocuments && intent.referencesDocument)) && !!conversationId;
 
   let ragContext: RetrievedContext | null = null;
   if (shouldRunRAG && conversationId) {
@@ -517,7 +519,13 @@ export async function POST(req: NextRequest) {
             });
             break;
           case 'gemini-3.1-pro':
-          case 'gemini-3-flash': {
+          case 'gemini-3-flash':
+          case 'gemini-3.1-flash-image': {
+            // gemini-3.1-flash-image is only for image generation (handled above);
+            // if we reach here, fall back to gemini-3-flash for normal streaming
+            if (actualModel === 'gemini-3.1-flash-image') {
+              actualModel = 'gemini-3-flash';
+            }
             // Extract image attachments for Gemini vision
             const imageAttachments = (attachments || [])
               .filter(a => a.type?.startsWith('image') && a.data)
@@ -526,12 +534,13 @@ export async function POST(req: NextRequest) {
             generator = streamGemini({
               systemPrompt,
               messages: assembledMessages,
-              model: actualModel,
+              model: actualModel as 'gemini-3.1-pro' | 'gemini-3-flash',
               enableSearch: intent.needsInternet,
               userId: user.id,
               conversationId: conversationId || undefined,
               signal: abortController.signal,
               imageAttachments,
+              existingCacheName: conversation?.gemini_cache_name || null,
             });
             break;
           }

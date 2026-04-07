@@ -19,7 +19,7 @@ async function callGeminiFlashJSON(prompt: string): Promise<string[]> {
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
-        maxOutputTokens: 300,
+        maxOutputTokens: 4096,
         temperature: 0.3,
         responseMimeType: 'application/json',
       },
