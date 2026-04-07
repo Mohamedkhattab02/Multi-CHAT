@@ -34,28 +34,8 @@ import pdfParse from 'pdf-parse-new';
 
 async function extractPdfText(base64Data: string): Promise<string> {
   const buffer = Buffer.from(base64Data, 'base64');
-
-  // Suppress noisy pdf.js font warnings (TT: CALL empty stack, etc.)
-  const originalWarn = console.warn;
-  const originalInfo = console.info;
-  console.warn = (...args: unknown[]) => {
-    const msg = String(args[0] || '');
-    if (msg.includes('TT:') || msg.includes('getTextContent')) return;
-    originalWarn.apply(console, args);
-  };
-  console.info = (...args: unknown[]) => {
-    const msg = String(args[0] || '');
-    if (msg.includes('TT:') || msg.includes('getTextContent')) return;
-    originalInfo.apply(console, args);
-  };
-
-  try {
-    const result = await pdfParse(buffer);
-    return result.text.slice(0, 8000);
-  } finally {
-    console.warn = originalWarn;
-    console.info = originalInfo;
-  }
+  const result = await pdfParse(buffer);
+  return result.text.slice(0, 8000);
 }
 
 export const runtime = 'nodejs';
@@ -131,8 +111,7 @@ export async function POST(req: NextRequest) {
 
   // Extract text content from PDF/text attachments
   let enrichedMessage = message;
-  type DocProcessResult = { filename: string; summary: string; chunk_count: number; key_sections: string[] };
-  const documentProcessingPromises: Promise<DocProcessResult>[] = [];
+  const documentProcessingPromises: Promise<void>[] = [];
 
   if (attachments?.length) {
     const textParts: string[] = [];
@@ -152,7 +131,7 @@ export async function POST(req: NextRequest) {
                   fileName: att.name || 'document.pdf',
                   content: pdfText,
                   fileType: 'pdf',
-                })
+                }).then(() => {})
               );
             }
           }
@@ -173,7 +152,7 @@ export async function POST(req: NextRequest) {
                 fileName: att.name || 'file.txt',
                 content: textContent,
                 fileType: att.type,
-              })
+              }).then(() => {})
             );
           }
         } catch {
@@ -186,25 +165,13 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // CRITICAL: Await document processing BEFORE RAG runs,
-  // so that document chunks exist in the DB when RAG queries them.
-  // Run classification in parallel with document processing to save time.
-  const [docResults, intent] = await Promise.all([
-    documentProcessingPromises.length > 0
-      ? Promise.allSettled(documentProcessingPromises).then(results =>
-          results
-            .filter((r): r is PromiseFulfilledResult<DocProcessResult> => r.status === 'fulfilled')
-            .map(r => r.value)
-        )
-      : Promise.resolve([] as DocProcessResult[]),
-    classifyIntent(enrichedMessage, hasImageAttachment),
-  ]);
-
-  // Log document processing results
-  if (docResults.length > 0) {
-    const totalChunks = docResults.reduce((sum, d) => sum + d.chunk_count, 0);
-    console.log(`[DocProcess] Processed ${docResults.length} documents, ${totalChunks} total chunks`);
+  // Fire document processing in background
+  if (documentProcessingPromises.length > 0) {
+    Promise.all(documentProcessingPromises)
+      .catch(err => Sentry.captureException(err, { tags: { action: 'document_processing' } }));
   }
+
+  const intent = await classifyIntent(enrichedMessage, hasImageAttachment);
 
   // ═══ SPECIAL ROUTE: Image Generation ═══
   if (intent.needsImageGeneration) {
@@ -301,21 +268,8 @@ export async function POST(req: NextRequest) {
   }
 
   // ═══ LAYER 2: MEMORY RETRIEVAL (RAG) — V4 8-step pipeline ═══
-  // If documents were just processed, refresh documentRegistry from DB
-  // (on first upload, the registry loaded earlier was empty)
-  if (docResults.length > 0 && conversationId) {
-    const { data: refreshedConv } = await supabase
-      .from('conversations')
-      .select('document_registry')
-      .eq('id', conversationId)
-      .single();
-    if (refreshedConv?.document_registry) {
-      documentRegistry = (refreshedConv.document_registry as unknown as Array<{ filename: string; summary: string }>) || [];
-    }
-  }
-
   // Force RAG when conversation has documents — user may reference them at any time
-  const hasDocuments = documentRegistry.length > 0 || docResults.some(d => d.chunk_count > 0);
+  const hasDocuments = documentRegistry.length > 0;
   const shouldRunRAG = (intent.needsRAG || hasDocuments) && !!conversationId;
 
   let ragContext: RetrievedContext | null = null;
@@ -344,12 +298,6 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Ensure ragContext includes the latest documentRegistry
-  // (important on first upload when ragContext may be null or have empty registry)
-  if (ragContext && documentRegistry.length > 0 && ragContext.documentRegistry.length === 0) {
-    ragContext.documentRegistry = documentRegistry;
-  }
-
   const { systemPrompt, messages: assembledMessages } = assembleContext({
     model: actualModel,
     userProfile: userProfile ? {
@@ -362,6 +310,7 @@ export async function POST(req: NextRequest) {
     rollingSummary: conversation?.summary,
     structuredSummary,
     workingMemory,
+    documentRegistry,
     classification: intent,
     language: intent.language,
   });
@@ -588,4 +537,3 @@ export async function POST(req: NextRequest) {
     },
   });
 }
-

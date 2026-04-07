@@ -3,11 +3,10 @@
 // Replaces blind recursive chunking with structure-aware parsing
 // Preserves code blocks, tables, lists as atomic units
 // Zero LLM cost — uses header breadcrumbs as context prefix
-// V4 fix: batch embedding + RPC insert (no PostgREST vector issues)
 // ============================================================
 
 import { createServiceClient } from '@/lib/supabase/server';
-import { generateEmbeddingBatch } from '@/lib/ai/embeddings';
+import { generateEmbedding } from '@/lib/ai/embeddings';
 import { estimateTokens } from '@/lib/utils/tokens';
 import * as Sentry from '@sentry/nextjs';
 
@@ -28,6 +27,10 @@ interface Chunk {
   };
 }
 
+/**
+ * Parse a document into structural blocks.
+ * Works for markdown, plain text, and extracted PDF text.
+ */
 function parseDocument(text: string): StructuralBlock[] {
   const lines = text.split('\n');
   const blocks: StructuralBlock[] = [];
@@ -51,8 +54,10 @@ function parseDocument(text: string): StructuralBlock[] {
   }
 
   for (const line of lines) {
+    // Code block detection
     if (line.trim().startsWith('```')) {
       if (inCodeBlock) {
+        // End of code block
         codeBlockContent.push(line);
         blocks.push({
           type: 'code',
@@ -63,6 +68,7 @@ function parseDocument(text: string): StructuralBlock[] {
         inCodeBlock = false;
         continue;
       } else {
+        // Start of code block
         flushBlock();
         inCodeBlock = true;
         codeBlockContent = [line];
@@ -75,12 +81,14 @@ function parseDocument(text: string): StructuralBlock[] {
       continue;
     }
 
+    // Heading detection
     const headingMatch = line.match(/^(#{1,6})\s+(.+)/);
     if (headingMatch) {
       flushBlock();
       const level = headingMatch[1].length;
       const title = headingMatch[2].trim();
 
+      // Update breadcrumb: remove anything at same or deeper level
       while (breadcrumb.length >= level) {
         breadcrumb.pop();
       }
@@ -95,6 +103,7 @@ function parseDocument(text: string): StructuralBlock[] {
       continue;
     }
 
+    // Table detection (lines with | separators)
     if (/^\|.*\|/.test(line.trim())) {
       if (currentType !== 'table') {
         flushBlock();
@@ -106,6 +115,7 @@ function parseDocument(text: string): StructuralBlock[] {
       flushBlock();
     }
 
+    // List detection
     if (/^\s*[-*+]\s/.test(line) || /^\s*\d+[.)]\s/.test(line)) {
       if (currentType !== 'list') {
         flushBlock();
@@ -118,6 +128,7 @@ function parseDocument(text: string): StructuralBlock[] {
       continue;
     }
 
+    // Empty line — flush current paragraph
     if (line.trim() === '') {
       if (currentBlock.length > 0) {
         flushBlock();
@@ -125,9 +136,11 @@ function parseDocument(text: string): StructuralBlock[] {
       continue;
     }
 
+    // Regular paragraph text
     currentBlock.push(line);
   }
 
+  // Flush any remaining content
   if (inCodeBlock && codeBlockContent.length > 0) {
     blocks.push({
       type: 'code',
@@ -140,6 +153,10 @@ function parseDocument(text: string): StructuralBlock[] {
   return blocks;
 }
 
+/**
+ * Chunk structural blocks respecting atomic boundaries.
+ * Code blocks and tables are never split.
+ */
 function chunkStructurally(blocks: StructuralBlock[], maxTokens = 400): Chunk[] {
   const chunks: Chunk[] = [];
   let currentBlocks: StructuralBlock[] = [];
@@ -148,6 +165,7 @@ function chunkStructurally(blocks: StructuralBlock[], maxTokens = 400): Chunk[] 
   for (const block of blocks) {
     const blockTokens = estimateTokens(block.content);
 
+    // Atomic blocks (code, table): always standalone
     if (block.type === 'code' || block.type === 'table') {
       if (currentBlocks.length > 0) {
         chunks.push(finalizeChunk(currentBlocks, chunks.length));
@@ -158,10 +176,12 @@ function chunkStructurally(blocks: StructuralBlock[], maxTokens = 400): Chunk[] 
       continue;
     }
 
+    // Skip headings as standalone (they'll be captured in breadcrumbs)
     if (block.type === 'heading') {
       continue;
     }
 
+    // If adding this block exceeds budget, close current chunk
     if (currentTokens + blockTokens > maxTokens && currentBlocks.length > 0) {
       chunks.push(finalizeChunk(currentBlocks, chunks.length));
       currentBlocks = [];
@@ -176,10 +196,10 @@ function chunkStructurally(blocks: StructuralBlock[], maxTokens = 400): Chunk[] 
     chunks.push(finalizeChunk(currentBlocks, chunks.length));
   }
 
-  const total = chunks.length;
+  // Fill in total_chunks
   return chunks.map(c => ({
     ...c,
-    metadata: { ...c.metadata, total_chunks: total },
+    metadata: { ...c.metadata, total_chunks: chunks.length },
   }));
 }
 
@@ -194,7 +214,7 @@ function finalizeChunk(blocks: StructuralBlock[], index: number): Chunk {
       section_type: sectionType,
       breadcrumb,
       chunk_index: index,
-      total_chunks: 0,
+      total_chunks: 0, // filled later
     },
   };
 }
@@ -208,55 +228,9 @@ function dominantType(blocks: StructuralBlock[]): string {
 }
 
 /**
- * Bypasses the typed Supabase client for custom RPC functions
- * that aren't in the generated Database types.
- * No `any`, no `never`, no `@ts-expect-error`.
+ * Process a document: parse into structural blocks, chunk, embed, and store.
+ * Returns the document registry entry.
  */
-type UntypedRpcClient = {
-  rpc: (
-    fn: string,
-    params?: Record<string, unknown>
-  ) => Promise<{ data: unknown; error: { message: string } | null }>;
-};
-
-async function rpcInsertEmbeddings(
-  supabase: ReturnType<typeof createServiceClient>,
-  rows: Array<Record<string, unknown>>
-): Promise<{ success: number; failed: number }> {
-  const SUB_BATCH = 40;
-  let success = 0;
-  let failed = 0;
-  const rpc = supabase as unknown as UntypedRpcClient;
-
-  for (let i = 0; i < rows.length; i += SUB_BATCH) {
-    const subBatch = rows.slice(i, i + SUB_BATCH);
-
-    const result = await rpc.rpc('insert_document_embeddings', {
-      batch_rows: subBatch,
-    });
-
-    if (result.error) {
-      console.error(
-        `[DocumentProcessor] RPC failed at row ${i}/${rows.length}: ${result.error.message}`
-      );
-      failed += subBatch.length;
-      continue;
-    }
-
-    // result.data is unknown — safely extract with typeof guards
-    const raw = result.data;
-    if (raw != null && typeof raw === 'object') {
-      const obj = raw as Record<string, unknown>;
-      if (typeof obj.success === 'number') success += obj.success;
-      if (typeof obj.failed === 'number') failed += obj.failed;
-    } else {
-      failed += subBatch.length;
-    }
-  }
-
-  return { success, failed };
-}
-
 export async function processDocument(params: {
   userId: string;
   conversationId: string;
@@ -274,71 +248,37 @@ export async function processDocument(params: {
   try {
     const supabase = createServiceClient();
 
+    // Parse and chunk
     const blocks = parseDocument(content);
     const chunks = chunkStructurally(blocks);
 
-    if (chunks.length === 0) {
-      return {
-        filename: fileName,
-        summary: `${fileName} (empty or could not be parsed)`,
-        chunk_count: 0,
-        key_sections: [],
-      };
-    }
-
-    const chunkTexts = chunks.map(c => c.content.slice(0, 8000));
-    const embeddings = await generateEmbeddingBatch(chunkTexts);
-
-    const allZero = embeddings.length > 0 && embeddings.every(e => e.every(v => v === 0));
-    if (allZero) {
-      console.error('[DocumentProcessor] All embeddings are zero vectors');
-      Sentry.captureMessage('Document embedding complete failure', {
-        level: 'error',
-        extra: { filename: fileName, chunk_count: chunks.length },
-      });
-      return {
-        filename: fileName,
-        summary: `${fileName} (embedding failed — no search available)`,
-        chunk_count: 0,
-        key_sections: [],
-      };
-    }
-
-    const rpcRows: Array<Record<string, unknown>> = chunks.map((chunk, i) => ({
-      user_id: userId,
-      source_type: 'document',
-      source_id: '',
-      content: chunk.content.slice(0, 8000),
-      embedding: embeddings[i],
-      metadata: {
-        conversation_id: conversationId,
-        file_name: fileName,
-        file_type: fileType,
-        is_active: true,
-        is_current_message: false,
-        section_type: chunk.metadata.section_type,
-        breadcrumb: chunk.metadata.breadcrumb,
-        chunk_index: chunk.metadata.chunk_index,
-        total_chunks: chunk.metadata.total_chunks,
-      },
-    }));
-
-    const { success, failed } = await rpcInsertEmbeddings(supabase, rpcRows);
-
-    if (failed > 0) {
-      Sentry.captureMessage('Document partial insert failure', {
-        level: 'warning',
-        extra: { filename: fileName, total: chunks.length, success, failed },
+    // Embed each chunk and store
+    for (const chunk of chunks) {
+      const embedding = await generateEmbedding(chunk.content);
+      await supabase.from('embeddings').insert({
+        user_id: userId,
+        source_type: 'document',
+        content: chunk.content.slice(0, 8000),
+        embedding,
+        metadata: {
+          conversation_id: conversationId,
+          file_name: fileName,
+          file_type: fileType,
+          is_active: true,
+          ...chunk.metadata,
+        },
       });
     }
 
+    // Build document registry entry
     const keySections = blocks
       .filter(b => b.type === 'heading')
       .map(b => b.content.replace(/^#+\s*/, ''))
       .slice(0, 10);
 
-    const summary = `${fileName} (${success} chunks, ${fileType}): ${keySections.slice(0, 3).join(', ') || 'document content'}`;
+    const summary = `${fileName} (${chunks.length} chunks, ${fileType}): ${keySections.slice(0, 3).join(', ') || 'document content'}`;
 
+    // Update conversation document registry
     const { data: convo } = await supabase
       .from('conversations')
       .select('document_registry')
@@ -349,7 +289,7 @@ export async function processDocument(params: {
     registry.push({
       filename: fileName,
       summary,
-      chunk_count: success,
+      chunk_count: chunks.length,
       key_sections: keySections,
       uploaded_at: new Date().toISOString(),
     });
@@ -362,13 +302,12 @@ export async function processDocument(params: {
     return {
       filename: fileName,
       summary,
-      chunk_count: success,
+      chunk_count: chunks.length,
       key_sections: keySections,
     };
   } catch (error) {
     Sentry.captureException(error, {
       tags: { action: 'document_processing' },
-      extra: { filename: fileName },
     });
     console.error('[DocumentProcessor] Failed:', error);
     return {
