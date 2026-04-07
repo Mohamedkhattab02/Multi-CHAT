@@ -66,7 +66,7 @@ export function assembleContext(params: AssembleParams): AssembledContext {
     if (docBlock) {
       assembledMessages.push(
         { role: 'user', content: `[Document content from uploaded files]\n${docBlock}` },
-        { role: 'assistant', content: 'I have the document content. I can answer questions about it.' }
+        { role: 'assistant', content: 'OK.' }
       );
     }
   }
@@ -77,7 +77,7 @@ export function assembleContext(params: AssembleParams): AssembledContext {
     if (ragBlock) {
       assembledMessages.push(
         { role: 'user', content: `[Retrieved context from memory]\n${ragBlock}` },
-        { role: 'assistant', content: 'I have the retrieved context. Let\'s continue.' }
+        { role: 'assistant', content: 'OK.' }
       );
     }
   }
@@ -146,6 +146,7 @@ function buildStablePrefix(
     if (wm.phase !== 'idle') wmParts.push(`Phase: ${wm.phase}`);
     if (wm.active_entities.length > 0) wmParts.push(`Active: ${wm.active_entities.join(', ')}`);
     if (wm.sub_tasks.length > 0) wmParts.push(`Sub-tasks: ${wm.sub_tasks.join(', ')}`);
+    if (wm.open_questions?.length > 0) wmParts.push(`Open questions: ${wm.open_questions.join('; ')}`);
     if (wm.last_decision) wmParts.push(`Last decision: ${wm.last_decision}`);
     parts.push('\nCurrent task (working memory):\n' + wmParts.map(p => `- ${p}`).join('\n'));
   }

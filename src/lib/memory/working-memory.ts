@@ -9,12 +9,13 @@ import { createServiceClient } from '@/lib/supabase/server';
 import type { ClassificationResult } from '@/lib/ai/classifier';
 import * as Sentry from '@sentry/nextjs';
 
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
 export interface WorkingMemory {
   current_task: string | null;
   sub_tasks: string[];
   active_entities: string[];
+  open_questions: string[];
   last_decision: string | null;
   phase: 'planning' | 'implementing' | 'debugging' | 'reviewing' | 'idle';
   updated_at: string | null;
@@ -24,6 +25,7 @@ export const DEFAULT_WORKING_MEMORY: WorkingMemory = {
   current_task: null,
   sub_tasks: [],
   active_entities: [],
+  open_questions: [],
   last_decision: null,
   phase: 'idle',
   updated_at: null,
@@ -72,11 +74,12 @@ ${messagesStr}
 Classification hint: phase=${classification.workingMemoryPhase || 'none'}
 
 Update the working memory. Return ONLY JSON matching this schema:
-{ "current_task": string|null, "sub_tasks": string[], "active_entities": string[], "last_decision": string|null, "phase": "planning|implementing|debugging|reviewing|idle" }
+{ "current_task": string|null, "sub_tasks": string[], "active_entities": string[], "open_questions": string[], "last_decision": string|null, "phase": "planning|implementing|debugging|reviewing|idle" }
 
 Rules:
 - Do NOT reset fields unless the task has clearly changed
 - Add to arrays; do not remove unless the item was explicitly resolved
+- open_questions: track questions the user asked that haven't been fully answered yet. Remove when answered.
 - If phase changed, explain in last_decision
 - Max 5 items per array (drop oldest if over)
 - If this is chitchat with no clear task, keep existing values`,
