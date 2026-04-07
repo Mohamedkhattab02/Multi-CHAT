@@ -29,6 +29,8 @@ export const DEFAULT_WORKING_MEMORY: WorkingMemory = {
   last_decision: null,
   phase: 'idle',
   updated_at: null,
+
+  
 };
 
 export async function getWorkingMemory(conversationId: string): Promise<WorkingMemory> {
