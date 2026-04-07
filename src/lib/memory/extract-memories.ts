@@ -10,7 +10,7 @@ import { generateEmbedding } from '@/lib/ai/embeddings';
 import { storeMemoryEmbedding } from '@/lib/memory/embed-store';
 import * as Sentry from '@sentry/nextjs';
 
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
 const VALID_TYPES = [
   'fact', 'preference', 'goal', 'skill', 'opinion',

@@ -7,7 +7,7 @@
 
 import * as Sentry from '@sentry/nextjs';
 
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
 async function callGeminiFlashJSON(prompt: string): Promise<string[]> {
   const response = await fetch(GEMINI_API_BASE, {

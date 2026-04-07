@@ -8,7 +8,7 @@ import { createServiceClient } from '@/lib/supabase/server';
 import { generateEmbedding } from '@/lib/ai/embeddings';
 import * as Sentry from '@sentry/nextjs';
 
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
 const REJECTION_PATTERNS = [
   /(?:didn'?t work|doesn'?t work|not working|failed|wrong|incorrect)/i,

@@ -489,8 +489,9 @@ export async function POST(req: NextRequest) {
                   .then(() => {});
               }
 
-              // 4. Rolling summary (V4: incremental patching) every 10 messages
-              if (messageCount > 12 && messageCount % 10 === 0) {
+              // 4. Rolling summary (V4: incremental patching)
+              // First summary at message 6, then every 8 messages
+              if (messageCount >= 6 && (messageCount === 6 || messageCount % 8 === 0)) {
                 generateRollingSummary(
                   conversation?.summary,
                   structuredSummary,
