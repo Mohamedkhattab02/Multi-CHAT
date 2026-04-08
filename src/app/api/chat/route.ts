@@ -33,6 +33,7 @@ import { z } from 'zod';
 import pdfParse from 'pdf-parse-new';
 import mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 
 async function extractPdfText(base64Data: string): Promise<string> {
   const buffer = Buffer.from(base64Data, 'base64');
@@ -76,6 +77,39 @@ function extractSpreadsheetText(base64Data: string): string {
     const csv = XLSX.utils.sheet_to_csv(sheet);
     parts.push(`[Sheet: ${sheetName}]\n${csv}`);
   }
+  return parts.join('\n\n').slice(0, 8000);
+}
+
+async function extractPptxText(base64Data: string): Promise<string> {
+  const buffer = Buffer.from(base64Data, 'base64');
+  const zip = await JSZip.loadAsync(buffer);
+  const parts: string[] = [];
+
+  // PPTX slides are stored as ppt/slides/slide1.xml, slide2.xml, etc.
+  const slideFiles = Object.keys(zip.files)
+    .filter(name => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    .sort((a, b) => {
+      const numA = parseInt(a.match(/slide(\d+)/)?.[1] || '0');
+      const numB = parseInt(b.match(/slide(\d+)/)?.[1] || '0');
+      return numA - numB;
+    });
+
+  for (const slideName of slideFiles.slice(0, 50)) {
+    const xml = await zip.files[slideName].async('text');
+    // Extract text from <a:t> tags (DrawingML text runs)
+    const texts: string[] = [];
+    const regex = /<a:t[^>]*>([\s\S]*?)<\/a:t>/g;
+    let match;
+    while ((match = regex.exec(xml)) !== null) {
+      const text = match[1].trim();
+      if (text) texts.push(text);
+    }
+    if (texts.length > 0) {
+      const slideNum = slideName.match(/slide(\d+)/)?.[1] || '?';
+      parts.push(`[Slide ${slideNum}]\n${texts.join(' ')}`);
+    }
+  }
+
   return parts.join('\n\n').slice(0, 8000);
 }
 
@@ -306,9 +340,53 @@ export async function POST(req: NextRequest) {
         att.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
         att.type === 'application/vnd.ms-powerpoint'
       ) {
-        textParts.push(`[Attached Presentation: ${att.name}]`);
+        try {
+          const pptxText = await extractPptxText(att.data);
+          if (pptxText.trim()) {
+            textParts.push(`[Attached Presentation: ${att.name}]\n${pptxText}`);
+            if (conversationId) {
+              documentProcessingPromises.push(
+                processDocument({
+                  userId: user.id,
+                  conversationId,
+                  fileName: att.name || 'presentation.pptx',
+                  content: pptxText,
+                  fileType: 'pptx',
+                })
+              );
+            }
+          } else {
+            textParts.push(`[Attached Presentation: ${att.name} — no text content found]`);
+          }
+        } catch (err) {
+          Sentry.captureException(err, { tags: { action: 'pptx_extract' } });
+          textParts.push(`[Attached Presentation: ${att.name} — could not extract text]`);
+        }
       } else if (!att.type.startsWith('image/')) {
-        textParts.push(`[Attached file: ${att.name}]`);
+        // Catch-all: try to read as UTF-8 text for unknown file types
+        try {
+          const rawText = Buffer.from(att.data, 'base64').toString('utf-8');
+          // Check if the content looks like valid text (not binary garbage)
+          const nonPrintableRatio = (rawText.match(/[\x00-\x08\x0E-\x1F]/g) || []).length / rawText.length;
+          if (nonPrintableRatio < 0.1 && rawText.trim().length > 0) {
+            textParts.push(`[Attached file: ${att.name}]\n${rawText.slice(0, 8000)}`);
+            if (conversationId) {
+              documentProcessingPromises.push(
+                processDocument({
+                  userId: user.id,
+                  conversationId,
+                  fileName: att.name || 'file',
+                  content: rawText,
+                  fileType: att.type,
+                })
+              );
+            }
+          } else {
+            textParts.push(`[Attached file: ${att.name} — binary file, text extraction not supported]`);
+          }
+        } catch {
+          textParts.push(`[Attached file: ${att.name}]`);
+        }
       }
     }
     if (textParts.length) {
@@ -319,7 +397,7 @@ export async function POST(req: NextRequest) {
   // CRITICAL: Await document processing BEFORE RAG runs,
   // so that document chunks exist in the DB when RAG queries them.
   // Run classification in parallel with document processing to save time.
-  const [docResults, intent] = await Promise.all([
+  const [docResults, rawIntent] = await Promise.all([
     documentProcessingPromises.length > 0
       ? Promise.allSettled(documentProcessingPromises).then(results =>
           results
@@ -329,6 +407,25 @@ export async function POST(req: NextRequest) {
       : Promise.resolve([] as DocProcessResult[]),
     classifyIntent(enrichedMessage, hasImageAttachment),
   ]);
+
+  // ═══ GUARD: Only allow image routing when actual image files are attached ═══
+  // PDFs with drawings/illustrations must NOT be routed to the image model
+  const intent = { ...rawIntent };
+  if (!hasImageAttachment) {
+    intent.hasImageInput = false;
+    if (intent.routeOverride === 'gemini-3.1-flash-image') {
+      intent.routeOverride = 'none';
+    }
+    if (intent.intent === 'image_analysis') {
+      intent.intent = 'analysis';
+    }
+    // Only allow needsImageGeneration if user explicitly asked to generate an image
+    // (not just because a document mentions images/drawings)
+    const IMAGE_GEN_RE = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make a picture|design)\b/i;
+    if (intent.needsImageGeneration && !IMAGE_GEN_RE.test(message)) {
+      intent.needsImageGeneration = false;
+    }
+  }
 
   // Log document processing results
   if (docResults.length > 0) {

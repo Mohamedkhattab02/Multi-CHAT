@@ -1,7 +1,8 @@
 'use client';
 
-import { memo, useState, useCallback } from 'react';
-import { Copy, Check, RefreshCw, Trash2, FileText, FileSpreadsheet, FileImage, File, Download, ExternalLink } from 'lucide-react';
+import { memo, useState, useCallback, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { Copy, Check, RefreshCw, Trash2, FileText, FileSpreadsheet, FileImage, File, Download, ExternalLink, X, ZoomIn } from 'lucide-react';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import type { Message } from '@/lib/supabase/types';
@@ -12,13 +13,6 @@ interface AttachmentData {
   name?: string;
   url?: string;
   size?: number;
-}
-
-function getFileIcon(type: string) {
-  if (type.startsWith('image/')) return FileImage;
-  if (type.includes('spreadsheet') || type.includes('excel') || type === 'text/csv') return FileSpreadsheet;
-  if (type.includes('word') || type === 'application/pdf' || type.includes('text/')) return FileText;
-  return File;
 }
 
 function getFileColor(type: string): string {
@@ -43,101 +37,307 @@ function formatFileSize(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function AttachmentPreview({ attachment }: { attachment: AttachmentData }) {
-  const [expanded, setExpanded] = useState(false);
-  const isImage = attachment.type?.startsWith('image/');
-  const Icon = getFileIcon(attachment.type || '');
-  const imageUrl = attachment.url || (attachment.data ? `data:${attachment.type};base64,${attachment.data}` : null);
+/* ───────────────────────── LIGHTBOX ───────────────────────── */
 
-  if (isImage && imageUrl) {
-    return (
-      <div className="mt-2">
-        <img
-          src={imageUrl}
-          alt={attachment.name || 'attachment'}
-          className="max-w-[300px] max-h-[300px] rounded-lg cursor-pointer hover:opacity-90 transition-opacity border border-[var(--border)]"
-          loading="lazy"
-          onClick={() => setExpanded(true)}
-        />
-        {expanded && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm cursor-pointer"
-            onClick={() => setExpanded(false)}
-          >
-            <img
-              src={imageUrl}
-              alt={attachment.name || 'attachment'}
-              className="max-w-[90vw] max-h-[90vh] rounded-lg shadow-2xl"
-            />
-            {attachment.url && (
-              <a
-                href={attachment.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="absolute top-4 right-4 p-2 rounded-full bg-white/20 hover:bg-white/30 transition-colors"
-                title="Open in new tab"
-              >
-                <ExternalLink className="w-5 h-5 text-white" />
-              </a>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
+function ImageLightbox({
+  imageUrl,
+  name,
+  onClose,
+}: {
+  imageUrl: string;
+  name: string;
+  onClose: () => void;
+}) {
+  const [loaded, setLoaded] = useState(false);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
-  // Non-image file attachment
-  const fileColor = getFileColor(attachment.type || '');
-  const fileExt = getFileExtension(attachment.name || 'file');
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
+  const handleDownload = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const a = document.createElement('a');
+    a.href = imageUrl;
+    a.download = name || 'image';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
 
   return (
-    <div className="mt-2">
-      {attachment.url ? (
-        <a
-          href={attachment.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/30 hover:bg-[var(--secondary)]/60 transition-colors max-w-[320px] group/file"
+    <div
+      ref={overlayRef}
+      onClick={(e) => {
+        if (e.target === overlayRef.current) onClose();
+      }}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 9999,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(0,0,0,0.92)',
+        backdropFilter: 'blur(12px)',
+        animation: 'lb-fade-in .2s ease-out',
+      }}
+    >
+      <style>{`
+        @keyframes lb-fade-in { from { opacity:0 } to { opacity:1 } }
+        @keyframes lb-scale-in { from { opacity:0; transform:scale(.94) } to { opacity:1; transform:scale(1) } }
+      `}</style>
+
+      {/* Close button — top right */}
+      <button
+        onClick={onClose}
+        style={{
+          position: 'absolute',
+          top: 16,
+          right: 16,
+          width: 40,
+          height: 40,
+          borderRadius: '50%',
+          background: 'rgba(255,255,255,0.1)',
+          border: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          zIndex: 10,
+          transition: 'background .15s',
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.2)')}
+        onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.1)')}
+      >
+        <X style={{ width: 20, height: 20, color: '#fff' }} />
+      </button>
+
+      {/* Image — fit to viewport */}
+      <div
+        style={{
+          maxWidth: '90vw',
+          maxHeight: '85vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          animation: 'lb-scale-in .25s ease-out',
+        }}
+      >
+        <img
+          src={imageUrl}
+          alt={name || 'Image'}
+          draggable={false}
+          onLoad={() => setLoaded(true)}
+          style={{
+            maxWidth: '100%',
+            maxHeight: '85vh',
+            objectFit: 'contain',
+            borderRadius: 12,
+            boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+            display: 'block',
+          }}
+        />
+      </div>
+
+      {/* Bottom toolbar */}
+      {loaded && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            marginTop: 16,
+            animation: 'lb-fade-in .3s ease-out',
+          }}
         >
-          {/* File type badge */}
-          <div
-            className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 text-white text-[10px] font-bold"
-            style={{ backgroundColor: fileColor }}
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginRight: 8, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {name || 'Image'}
+          </span>
+          <button
+            onClick={handleDownload}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '6px 14px', borderRadius: 8,
+              background: 'rgba(255,255,255,0.1)', border: 'none',
+              color: 'rgba(255,255,255,0.8)', fontSize: 12,
+              cursor: 'pointer', transition: 'background .15s',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.2)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.1)')}
           >
-            {fileExt}
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-[var(--foreground)] truncate">
-              {attachment.name || 'File'}
-            </p>
-            <p className="text-[10px] text-[var(--muted-foreground)]">
-              {formatFileSize(attachment.size)} &middot; Click to open
-            </p>
-          </div>
-          <ExternalLink className="w-3.5 h-3.5 text-[var(--muted-foreground)] opacity-0 group-hover/file:opacity-100 transition-opacity flex-shrink-0" />
-        </a>
-      ) : (
-        <div className="inline-flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/30 max-w-[320px]">
-          <div
-            className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 text-white text-[10px] font-bold"
-            style={{ backgroundColor: fileColor }}
+            <Download style={{ width: 14, height: 14 }} /> Save
+          </button>
+          <a
+            href={imageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '6px 14px', borderRadius: 8,
+              background: 'rgba(255,255,255,0.1)', border: 'none',
+              color: 'rgba(255,255,255,0.8)', fontSize: 12, textDecoration: 'none',
+              cursor: 'pointer', transition: 'background .15s',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.2)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.1)')}
           >
-            {fileExt}
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-[var(--foreground)] truncate">
-              {attachment.name || 'File'}
-            </p>
-            <p className="text-[10px] text-[var(--muted-foreground)]">
-              {formatFileSize(attachment.size)}
-            </p>
-          </div>
+            <ExternalLink style={{ width: 14, height: 14 }} /> Open
+          </a>
         </div>
       )}
     </div>
   );
 }
+
+/* ───────────────── IMAGE THUMBNAIL (small, clickable) ───────────────── */
+
+function ImageThumbnail({ attachment }: { attachment: AttachmentData }) {
+  const [expanded, setExpanded] = useState(false);
+  const imageUrl = attachment.url || (attachment.data ? `data:${attachment.type};base64,${attachment.data}` : null);
+
+  if (!imageUrl) return null;
+
+  return (
+    <>
+      <div
+        className="relative group/img cursor-pointer"
+        onClick={() => setExpanded(true)}
+        style={{
+          width: 200,
+          height: 140,
+          borderRadius: 10,
+          overflow: 'hidden',
+          flexShrink: 0,
+          border: '1px solid var(--border)',
+        }}
+      >
+        <img
+          src={imageUrl}
+          alt={attachment.name || 'attachment'}
+          loading="lazy"
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            display: 'block',
+          }}
+        />
+        {/* Hover overlay */}
+        <div
+          style={{
+            position: 'absolute', inset: 0,
+            background: 'rgba(0,0,0,0)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'background .15s',
+            pointerEvents: 'none',
+          }}
+          className="group-hover/img:!bg-black/30"
+        >
+          <div
+            style={{
+              opacity: 0, background: 'rgba(0,0,0,0.55)', borderRadius: '50%',
+              width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'opacity .15s',
+            }}
+            className="group-hover/img:!opacity-100"
+          >
+            <ZoomIn style={{ width: 18, height: 18, color: '#fff' }} />
+          </div>
+        </div>
+        {/* File name label at bottom */}
+        {attachment.name && (
+          <div
+            style={{
+              position: 'absolute', bottom: 0, left: 0, right: 0,
+              padding: '14px 8px 5px',
+              background: 'linear-gradient(transparent, rgba(0,0,0,0.55))',
+              pointerEvents: 'none',
+            }}
+          >
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.9)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
+              {attachment.name}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {expanded && createPortal(
+        <ImageLightbox
+          imageUrl={imageUrl}
+          name={attachment.name || 'image'}
+          onClose={() => setExpanded(false)}
+        />,
+        document.body
+      )}
+    </>
+  );
+}
+
+/* ───────────────── FILE ATTACHMENT (non-image) ───────────────── */
+
+function FileAttachmentPreview({ attachment }: { attachment: AttachmentData }) {
+  const fileColor = getFileColor(attachment.type || '');
+  const fileExt = getFileExtension(attachment.name || 'file');
+
+  const inner = (
+    <>
+      <div
+        style={{
+          width: 40, height: 40, borderRadius: 8,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          backgroundColor: fileColor, color: '#fff',
+          fontSize: 10, fontWeight: 700, flexShrink: 0,
+        }}
+      >
+        {fileExt}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p className="text-xs font-medium text-[var(--foreground)] truncate">
+          {attachment.name || 'File'}
+        </p>
+        <p className="text-[10px] text-[var(--muted-foreground)]">
+          {formatFileSize(attachment.size)}
+          {attachment.url && <> &middot; Click to open</>}
+        </p>
+      </div>
+    </>
+  );
+
+  if (attachment.url) {
+    return (
+      <a
+        href={attachment.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/30 hover:bg-[var(--secondary)]/60 transition-colors max-w-[300px]"
+      >
+        {inner}
+      </a>
+    );
+  }
+
+  return (
+    <div className="inline-flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/30 max-w-[300px]">
+      {inner}
+    </div>
+  );
+}
+
+/* ───────────────── MESSAGE BUBBLE ───────────────── */
 
 interface MessageBubbleProps {
   message: Message;
@@ -164,12 +364,11 @@ export const MessageBubble = memo(function MessageBubble({
 
   const relativeTime = useRelativeTime(message.created_at);
 
-  // Parse attachments
   const attachments = (message.attachments || []) as AttachmentData[];
-  const generatedImage = attachments.find(
-    (a) => a.type?.startsWith('image') && a.data
-  );
+  const imageAttachments = attachments.filter((a) => a.type?.startsWith('image/'));
+  const fileAttachments = attachments.filter((a) => !a.type?.startsWith('image/'));
 
+  /* ── USER MESSAGE ── */
   if (message.role === 'user') {
     return (
       <div
@@ -177,10 +376,10 @@ export const MessageBubble = memo(function MessageBubble({
         onMouseEnter={() => setShowActions(true)}
         onMouseLeave={() => setShowActions(false)}
       >
-        <div className="relative max-w-[80%]">
-          {/* User actions */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, maxWidth: '80%', position: 'relative' }}>
+          {/* Hover actions */}
           {showActions && (
-            <div className="absolute -left-20 top-1 flex items-center gap-1 animate-fade-in">
+            <div className="absolute -left-20 top-1 flex items-center gap-1 animate-fade-in" style={{ zIndex: 2 }}>
               <button
                 onClick={handleCopy}
                 className="p-1 rounded hover:bg-[var(--secondary)] transition-colors cursor-pointer"
@@ -203,18 +402,36 @@ export const MessageBubble = memo(function MessageBubble({
               )}
             </div>
           )}
-          <div className="rounded-2xl rounded-br-md px-4 py-3 text-sm bg-[var(--primary)] text-[var(--primary-foreground)] leading-relaxed">
-            <div dir="auto">{message.content}</div>
-            {/* Attachments (images, documents, etc.) */}
-            {attachments.length > 0 && (
-              <div className="flex flex-col gap-1">
-                {attachments.map((a, i) => (
-                  <AttachmentPreview key={i} attachment={a} />
-                ))}
-              </div>
-            )}
-          </div>
-          <div className="text-[10px] text-[var(--muted-foreground)] mt-1 text-right opacity-0 group-hover:opacity-100 transition-opacity">
+
+          {/* Image thumbnails — ABOVE the text bubble, small fixed-size cards */}
+          {imageAttachments.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'flex-end' }}>
+              {imageAttachments.map((a, i) => (
+                <ImageThumbnail key={`img-${i}`} attachment={a} />
+              ))}
+            </div>
+          )}
+
+          {/* Text bubble */}
+          {message.content && (
+            <div
+              className="rounded-2xl rounded-br-md px-4 py-3 text-sm bg-[var(--primary)] text-[var(--primary-foreground)] leading-relaxed"
+              style={{ overflow: 'hidden', wordBreak: 'break-word' }}
+            >
+              <div dir="auto">{message.content}</div>
+            </div>
+          )}
+
+          {/* File attachments — no bubble background */}
+          {fileAttachments.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {fileAttachments.map((a, i) => (
+                <FileAttachmentPreview key={`file-${i}`} attachment={a} />
+              ))}
+            </div>
+          )}
+
+          <div className="text-[10px] text-[var(--muted-foreground)] text-right opacity-0 group-hover:opacity-100 transition-opacity">
             {relativeTime}
           </div>
         </div>
@@ -222,7 +439,7 @@ export const MessageBubble = memo(function MessageBubble({
     );
   }
 
-  // Assistant message
+  /* ── ASSISTANT MESSAGE ── */
   return (
     <div
       className="flex gap-3 group"
@@ -237,23 +454,26 @@ export const MessageBubble = memo(function MessageBubble({
         {(model?.shortName ?? 'AI').charAt(0)}
       </div>
 
-      {/* Message content */}
+      {/* Content */}
       <div className="flex-1 min-w-0">
         <div className="text-sm text-[var(--foreground)] leading-relaxed">
           <MarkdownRenderer content={message.content} />
 
-          {/* Attachments (generated images, files, etc.) */}
+          {/* Attachments */}
           {attachments.length > 0 && (
-            <div className="flex flex-col gap-1">
-              {attachments.map((a, i) => (
-                <div key={i}>
-                  <AttachmentPreview attachment={a} />
-                  {a.type?.startsWith('image') && a.data && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+              {imageAttachments.map((a, i) => (
+                <div key={`img-${i}`}>
+                  <ImageThumbnail attachment={a} />
+                  {a.data && (
                     <p className="text-xs text-[var(--muted-foreground)] mt-1">
                       Generated by Gemini Flash Image
                     </p>
                   )}
                 </div>
+              ))}
+              {fileAttachments.map((a, i) => (
+                <FileAttachmentPreview key={`file-${i}`} attachment={a} />
               ))}
             </div>
           )}

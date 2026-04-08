@@ -273,7 +273,6 @@ export function ChatInput({
               ref={fileInputRef}
               type="file"
               multiple
-              accept="image/*,application/pdf,text/plain,text/markdown,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/msword,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/json,application/xml,text/xml,text/html,application/zip,application/x-zip-compressed,application/rtf"
               onChange={handleFileSelect}
               className="hidden"
             />

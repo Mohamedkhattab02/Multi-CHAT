@@ -75,7 +75,16 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
         })
       );
 
-      // Immediately show user message (optimistic)
+      // Immediately show user message (optimistic) with file previews
+      const optimisticAttachments = attachments.map((att) => ({
+        type: att.type,
+        name: att.name,
+        size: att.size,
+        // For images, create a blob URL for immediate preview
+        ...(att.type.startsWith('image/')
+          ? { url: URL.createObjectURL(att.file) }
+          : {}),
+      }));
       const optimisticUserMsg: Message = {
         id: `optimistic-${Date.now()}`,
         conversation_id: conversation.id,
@@ -84,11 +93,7 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
         content_blocks: null,
         model: selectedModel,
         token_count: null,
-        attachments: serializedAttachments.map(a => ({
-          type: a.type,
-          name: a.name,
-          size: a.size,
-        })),
+        attachments: optimisticAttachments,
         created_at: new Date().toISOString(),
       };
       addMessages([optimisticUserMsg]);

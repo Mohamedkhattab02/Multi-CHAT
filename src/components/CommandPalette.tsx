@@ -203,7 +203,7 @@ export function CommandPalette() {
                   <CommandItem
                     icon={Plus}
                     label="New conversation"
-                    shortcut="Ctrl+N"
+                    shortcut="Ctrl+Shift+O"
                     onSelect={() => runAction(createNewChat)}
                   />
                   <CommandItem

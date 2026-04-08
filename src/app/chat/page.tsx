@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { useChatStore } from '@/lib/store/chat-store';
@@ -8,17 +8,22 @@ import { useStreaming } from '@/lib/hooks/use-streaming';
 import { EmptyState } from '@/components/chat/EmptyState';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { StreamingMessage } from '@/components/chat/StreamingMessage';
+import { MessageBubble } from '@/components/chat/MessageBubble';
 import { useSidebarStore } from '@/lib/store/sidebar-store';
 import { PanelLeft } from 'lucide-react';
 import { toast } from 'sonner';
 import type { ModelId } from '@/lib/utils/constants';
+import type { Message } from '@/lib/supabase/types';
 
 export default function NewChatPage() {
   const router = useRouter();
   const { selectedModel, setSelectedModel } = useChatStore();
   const { isOpen, toggle } = useSidebarStore();
-  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
-  const [pendingAttachments, setPendingAttachments] = useState<Array<{ type: string; name: string; size: number; preview?: string }>>([]);
+
+  // Track the conversation created after the first message
+  const conversationIdRef = useRef<string | null>(null);
+  // All messages exchanged so far (kept in local state, no navigation needed)
+  const [messages, setMessages] = useState<Message[]>([]);
 
   const {
     isStreaming,
@@ -35,43 +40,65 @@ export default function NewChatPage() {
     ) => {
       if (!text.trim() && attachments.length === 0) return;
 
-      setPendingMessage(text);
-      setPendingAttachments(attachments.map(a => ({
-        type: a.type,
-        name: a.name,
-        size: a.size,
-        preview: a.type.startsWith('image/') ? URL.createObjectURL(a.file) : undefined,
-      })));
-
       try {
-        // 1. Create a new conversation
-        const supabase = createClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user) {
-          toast.error('Please log in to start a conversation');
-          return;
+        let convId = conversationIdRef.current;
+
+        // First message — create a new conversation
+        if (!convId) {
+          const supabase = createClient();
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+          if (!user) {
+            toast.error('Please log in to start a conversation');
+            return;
+          }
+
+          const { data: conversation, error } = await supabase
+            .from('conversations')
+            .insert({
+              user_id: user.id,
+              title: text.slice(0, 80) || 'New conversation',
+              model: selectedModel,
+            })
+            .select('id')
+            .single();
+
+          if (error || !conversation) {
+            console.error('[CreateConversation] Error:', error);
+            toast.error(`Failed to create conversation: ${error?.message || 'unknown error'}`);
+            return;
+          }
+
+          convId = conversation.id;
+          conversationIdRef.current = convId;
+          // Update URL silently — no re-render
+          window.history.replaceState(null, '', `/chat/${convId}`);
         }
 
-        const { data: conversation, error } = await supabase
-          .from('conversations')
-          .insert({
-            user_id: user.id,
-            title: text.slice(0, 80) || 'New conversation',
-            model: selectedModel,
-          })
-          .select('id')
-          .single();
+        // Build optimistic user message with file previews
+        const optimisticAttachments = attachments.map((att) => ({
+          type: att.type,
+          name: att.name,
+          size: att.size,
+          ...(att.type.startsWith('image/')
+            ? { url: URL.createObjectURL(att.file) }
+            : {}),
+        }));
+        const optimisticUserMsg: Message = {
+          id: `optimistic-${Date.now()}`,
+          conversation_id: convId,
+          role: 'user',
+          content: text,
+          content_blocks: null,
+          model: selectedModel,
+          token_count: null,
+          attachments: optimisticAttachments,
+          created_at: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, optimisticUserMsg]);
 
-        if (error || !conversation) {
-          console.error('[CreateConversation] Error:', error);
-          toast.error(`Failed to create conversation: ${error?.message || 'unknown error'}`);
-          setPendingMessage(null);
-          return;
-        }
-
-        // 2. Convert file attachments (all types as base64)
+        // Convert files to base64
         const serializedAttachments = await Promise.all(
           attachments.map(async (att) => {
             const data = await fileToBase64(att.file);
@@ -79,23 +106,22 @@ export default function NewChatPage() {
           })
         );
 
-        // 3. Send message via streaming
+        // Send via streaming
         await sendMessage({
           message: text,
-          conversationId: conversation.id,
+          conversationId: convId,
           model: selectedModel,
           attachments: serializedAttachments,
-          onMessageSaved: () => {
-            // Navigate to the new conversation
-            router.push(`/chat/${conversation.id}`);
+          onMessageSaved: (_userMsg, assistantMsg) => {
+            // Append the assistant response — NO navigation, NO re-render
+            setMessages((prev) => [...prev, assistantMsg]);
           },
         });
       } catch (err) {
         toast.error(err instanceof Error ? err.message : 'Failed to send message');
-        setPendingMessage(null);
       }
     },
-    [selectedModel, sendMessage, router]
+    [selectedModel, sendMessage]
   );
 
   const handleSuggestionClick = useCallback(
@@ -104,6 +130,8 @@ export default function NewChatPage() {
     },
     [handleSend]
   );
+
+  const hasMessages = messages.length > 0;
 
   return (
     <div className="flex flex-col h-full">
@@ -122,37 +150,24 @@ export default function NewChatPage() {
 
       {/* Main area */}
       <div className="flex-1 overflow-hidden">
-        {isStreaming && pendingMessage ? (
+        {hasMessages || isStreaming ? (
           <div className="h-full flex flex-col">
-            {/* Show the user's sent message */}
             <div className="flex-1 overflow-y-auto chat-scroll">
               <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-                {/* User message */}
-                <div className="flex justify-end">
-                  <div className="max-w-[85%] px-4 py-3 rounded-2xl bg-[var(--primary)] text-[var(--primary-foreground)] text-sm leading-relaxed rounded-br-md">
-                    <div dir="auto">{pendingMessage}</div>
-                    {pendingAttachments.length > 0 && (
-                      <div className="flex flex-wrap gap-2 mt-2">
-                        {pendingAttachments.map((att, i) => (
-                          <div key={i} className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/10 text-xs">
-                            {att.preview ? (
-                              <img src={att.preview} alt={att.name} className="w-8 h-8 rounded object-cover" />
-                            ) : null}
-                            <span className="truncate max-w-[100px]">{att.name}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                {/* Render all messages using the real MessageBubble */}
+                {messages.map((msg) => (
+                  <MessageBubble key={msg.id} message={msg} />
+                ))}
 
                 {/* Streaming assistant response */}
-                <StreamingMessage
-                  content={streamingContent}
-                  model={selectedModel}
-                  routeOverride={routeOverride}
-                  onStop={stopStreaming}
-                />
+                {isStreaming && (
+                  <StreamingMessage
+                    content={streamingContent}
+                    model={selectedModel}
+                    routeOverride={routeOverride}
+                    onStop={stopStreaming}
+                  />
+                )}
               </div>
             </div>
           </div>

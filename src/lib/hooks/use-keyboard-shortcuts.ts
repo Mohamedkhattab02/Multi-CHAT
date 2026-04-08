@@ -37,8 +37,8 @@ export function useKeyboardShortcuts() {
       // Below shortcuts only work outside inputs
       if (isInput) return;
 
-      // Ctrl+N — New chat
-      if (ctrl && e.key === 'n') {
+      // Ctrl+Shift+O — New chat
+      if (ctrl && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
         e.preventDefault();
         createNewChat();
         return;

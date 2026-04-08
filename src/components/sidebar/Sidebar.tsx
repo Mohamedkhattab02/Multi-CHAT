@@ -107,7 +107,7 @@ export function Sidebar({ userId }: SidebarProps) {
             <button
               onClick={createNewChat}
               className="p-1.5 rounded-lg hover:bg-[var(--sidebar-hover)] transition-colors cursor-pointer"
-              title="New chat (Ctrl+N)"
+              title="New chat (Ctrl+Shift+O)"
             >
               <PenSquare className="w-4 h-4 text-[var(--muted-foreground)]" />
             </button>
