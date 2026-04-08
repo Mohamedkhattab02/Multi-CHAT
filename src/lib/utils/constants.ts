@@ -85,8 +85,8 @@ export const USER_SELECTABLE_MODELS: ModelId[] = [
 
 export const DEFAULT_MODEL: ModelId = 'gemini-3.1-pro';
 
-export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-export const MAX_ATTACHMENTS = 5;
+export const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+export const MAX_ATTACHMENTS = 20;
 export const DAILY_MESSAGE_LIMIT = 100;
 
 // Legacy budgets (kept for backward compatibility)

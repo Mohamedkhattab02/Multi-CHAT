@@ -1,0 +1,45 @@
+  └─ ƒ getMessages("2940c8f3-6070-4272-a155-98c5ba62db70") in 1409ms src/actions/messages.ts
+TypeError: fetch failed
+    at ignore-listed frames {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.64.149.246:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+ POST /api/chat 401 in 10.8s (next.js: 4ms, application-code: 10.8s)
+[browser] [useStreaming] Error: Error: Error: 401
+    at useStreaming.useCallback[sendMessage] (file://C:/Users/khale/OneDrive/Desktop/Multi-CHAT/.next/dev/static/chunks/OneDrive_Desktop_Multi-CHAT_src_0t112he._.js:104:27)
+    at async ChatArea[handleSend] (file://C:/Users/khale/OneDrive/Desktop/Multi-CHAT/.next/dev/static/chunks/OneDrive_Desktop_Multi-CHAT_src_0qbd7l0._.js:4809:21) (file://C:/Users/khale/OneDrive/Desktop/Multi-CHAT/.next/dev/static/chunks/OneDrive_Desktop_Multi-CHAT_src_0t112he._.js:228:29)
+TypeError: fetch failed
+    at ignore-listed frames {
+  [cause]: Error [ConnectTimeoutError]: Connect Timeout Error (attempted addresses: 172.64.149.246:443, 104.18.38.10:443, timeout: 10000ms)
+      at ignore-listed frames {
+    code: 'UND_ERR_CONNECT_TIMEOUT'
+  }
+}
+ POST /api/chat 401 in 10.8s (next.js: 3ms, application-code: 10.8s)
+[browser] [useStreaming] Error: Error: Error: 401
+    at useStreaming.useCallback[sendMessage] (file://C:/Users/khale/OneDrive/Desktop/Multi-CHAT/.next/dev/static/chunks/OneDrive_Desktop_Multi-CHAT_src_0t112he._.js:104:27)
+    at async ChatArea[handleSend] (file://C:/Users/khale/OneDrive/Desktop/Multi-CHAT/.next/dev/static/chunks/OneDrive_Desktop_Multi-CHAT_src_0qbd7l0._.js:4809:21) (file://C:/Users/khale/OneDrive/Desktop/Multi-CHAT/.next/dev/static/chunks/OneDrive_Desktop_Multi-CHAT_src_0t112he._.js:228:29)
+ 
+error 2 :
+[useStreaming] Error: Error: Gemini error: [GoogleGenerativeAI Error]: Error fetching from https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse: fetch failed
+    at useStreaming.useCallback[sendMessage] (file://C:/Users/khale/OneDrive/Desktop/Multi-CHAT/.next/dev/static/chunks/OneDrive_Desktop_Multi-CHAT_src_0qbd7l0._.js:660:39)
+    at async ChatArea[handleSend] (file://C:/Users/khale/OneDrive/Desktop/Multi-CHAT/.next/dev/static/chunks/OneDrive_Desktop_Multi-CHAT_src_0qbd7l0._.js:4809:21)
+
+error 3 :
+
+Info: page=2 - getTextContent: time=117ms
+Info: page=3 - getTextContent: time=3ms
+Info: page=4 - getTextContent: time=2ms
+Warning: fetchStandardFontData: failed to fetch file "LiberationSans-Regular.ttf" with "UnknownErrorException: The standard font "baseUrl" parameter must be specified, ensure that the "standardFontDataUrl" API parameter is provided.".
+Info: page=5 - getTextContent: time=11ms
+Info: page=6 - getTextContent: time=2ms
+Info: page=7 - getTextContent: time=6ms
+Info: page=8 - getTextContent: time=11ms
+Info: page=9 - getTextContent: ti
+
+Info: page=73 - getTextContent: time=2ms
+Info: page=74 - getTextContent: time=3ms
+[DocumentProcessor] RPC failed at row 0/6: TypeError: fetch failed
+[DocProcess] Processed 1 documents, 0 total chunks

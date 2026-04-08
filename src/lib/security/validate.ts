@@ -6,19 +6,18 @@ import { z } from 'zod';
 
 export const ChatMessageSchema = z.object({
   conversationId: z.string().uuid().optional(),
-  message: z.string().min(0).max(50000),
+  message: z.string().min(0),
   model: z.enum(['gpt-5.1', 'gpt-5-mini', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-3.1-flash-image', 'glm-4.7', 'glm-4.6']),
   attachments: z
     .array(
       z.object({
         type: z.string().max(100),
         name: z.string().max(255),
-        size: z.number().max(10 * 1024 * 1024), // 10MB max
+        size: z.number(),
         url: z.string().url().optional(),
         data: z.string().optional(), // base64 for images
       })
     )
-    .max(5)
     .optional()
     .default([]),
 });
@@ -65,7 +64,7 @@ export const SUPPORTED_FILE_TYPES = [
 export const UploadSchema = z.object({
   fileName: z.string().max(255),
   fileType: z.string().max(200),
-  fileSize: z.number().max(10 * 1024 * 1024),
+  fileSize: z.number(),
 });
 
 export const ShareSchema = z.object({

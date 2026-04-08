@@ -28,6 +28,7 @@ import { updateWorkingMemory, type WorkingMemory } from '@/lib/memory/working-me
 import { detectAntiMemory } from '@/lib/memory/anti-memory';
 import { updateConversationFingerprint } from '@/lib/memory/conversation-fingerprint';
 import { ChatMessageSchema } from '@/lib/security/validate';
+import { extractWithVision } from '@/lib/ai/vision-extract';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import pdfParse from 'pdf-parse-new';
@@ -181,10 +182,25 @@ export async function POST(req: NextRequest) {
   }
   const supabase = await createClient();
 
-  // Get authenticated user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Get authenticated user (retry once on network timeout)
+  let user = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { data } = await supabase.auth.getUser();
+      user = data.user;
+      break;
+    } catch (err) {
+      const isTimeout = err instanceof Error &&
+        (err.message.includes('fetch failed') || err.message.includes('ConnectTimeout') || err.message.includes('ENOTFOUND'));
+      if (isTimeout && attempt === 0) {
+        console.warn('[Auth] Supabase timeout, retrying...');
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
+      }
+      console.error('[Auth] Failed:', err);
+      break;
+    }
+  }
   if (!user) return new Response('Unauthorized', { status: 401 });
 
   // ═══ SECURITY: Daily message limit ═══
@@ -242,19 +258,31 @@ export async function POST(req: NextRequest) {
         size: att.size,
       });
 
-      // Extract text content based on file type
+      // ── Extract content: Vision-first for PDFs, fallback to text extraction ──
       if (att.type === 'application/pdf') {
         try {
-          const pdfText = await extractPdfText(att.data);
-          if (pdfText.trim()) {
-            textParts.push(`[Attached PDF: ${att.name}]\n${pdfText}`);
+          // PRIMARY: Gemini Vision — sees text, images, diagrams, tables visually
+          const vision = await extractWithVision(att.data, att.type, att.name || 'document.pdf');
+          let extractedText = vision.text;
+
+          // FALLBACK: if Vision returned empty/too short, use traditional text extraction
+          if (!extractedText || extractedText.trim().length < 50) {
+            console.log(`[Extract] Vision returned little content for ${att.name}, falling back to pdf-parse`);
+            const fallbackText = await extractPdfText(att.data);
+            if (fallbackText.trim().length > extractedText.trim().length) {
+              extractedText = fallbackText;
+            }
+          }
+
+          if (extractedText.trim()) {
+            textParts.push(`[Attached PDF: ${att.name}]\n${extractedText}`);
             if (conversationId) {
               documentProcessingPromises.push(
                 processDocument({
                   userId: user.id,
                   conversationId,
                   fileName: att.name || 'document.pdf',
-                  content: pdfText,
+                  content: extractedText,
                   fileType: 'pdf',
                 })
               );
@@ -269,16 +297,16 @@ export async function POST(req: NextRequest) {
         att.type === 'application/msword'
       ) {
         try {
-          const docxText = await extractDocxText(att.data);
-          if (docxText.trim()) {
-            textParts.push(`[Attached Document: ${att.name}]\n${docxText}`);
+          const extractedText = await extractDocxText(att.data);
+          if (extractedText.trim()) {
+            textParts.push(`[Attached Document: ${att.name}]\n${extractedText}`);
             if (conversationId) {
               documentProcessingPromises.push(
                 processDocument({
                   userId: user.id,
                   conversationId,
                   fileName: att.name || 'document.docx',
-                  content: docxText,
+                  content: extractedText,
                   fileType: 'docx',
                 })
               );
@@ -341,16 +369,16 @@ export async function POST(req: NextRequest) {
         att.type === 'application/vnd.ms-powerpoint'
       ) {
         try {
-          const pptxText = await extractPptxText(att.data);
-          if (pptxText.trim()) {
-            textParts.push(`[Attached Presentation: ${att.name}]\n${pptxText}`);
+          const extractedText = await extractPptxText(att.data);
+          if (extractedText.trim()) {
+            textParts.push(`[Attached Presentation: ${att.name}]\n${extractedText}`);
             if (conversationId) {
               documentProcessingPromises.push(
                 processDocument({
                   userId: user.id,
                   conversationId,
                   fileName: att.name || 'presentation.pptx',
-                  content: pptxText,
+                  content: extractedText,
                   fileType: 'pptx',
                 })
               );
@@ -366,7 +394,6 @@ export async function POST(req: NextRequest) {
         // Catch-all: try to read as UTF-8 text for unknown file types
         try {
           const rawText = Buffer.from(att.data, 'base64').toString('utf-8');
-          // Check if the content looks like valid text (not binary garbage)
           const nonPrintableRatio = (rawText.match(/[\x00-\x08\x0E-\x1F]/g) || []).length / rawText.length;
           if (nonPrintableRatio < 0.1 && rawText.trim().length > 0) {
             textParts.push(`[Attached file: ${att.name}]\n${rawText.slice(0, 8000)}`);

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(curl -s \"https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyA9PIq74dt0j2FVwMAUwTJbH64eTXqG2xo\")",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(m['name']\\) for m in data['models']]\")",
+      "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\);process.stdin.on\\('end',\\(\\)=>{const j=JSON.parse\\(d\\);j.models.forEach\\(m=>console.log\\(m.name\\)\\)}\\)\")"
+    ]
+  }
+}
