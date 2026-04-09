@@ -440,7 +440,8 @@ export async function POST(req: NextRequest) {
   const intent = { ...rawIntent };
   if (!hasImageAttachment) {
     intent.hasImageInput = false;
-    if (intent.routeOverride === 'gemini-3.1-flash-image') {
+    // Only reset image routing for image ANALYSIS (not generation)
+    if (intent.routeOverride === 'gemini-3.1-flash-image' && !intent.needsImageGeneration) {
       intent.routeOverride = 'none';
     }
     if (intent.intent === 'image_analysis') {
@@ -448,9 +449,13 @@ export async function POST(req: NextRequest) {
     }
     // Only allow needsImageGeneration if user explicitly asked to generate an image
     // (not just because a document mentions images/drawings)
-    const IMAGE_GEN_RE = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make a picture|design)\b/i;
+    const IMAGE_GEN_RE = /(צור תמונה|תייצר.*תמונה|תייצר.*צמונה|תעשה.*תמונה|תכין.*תמונה|צייר|ציור|תמונה של|generate image|create image|draw me|draw a|paint|illustrate|make a picture|make an image|design an image)/i;
     if (intent.needsImageGeneration && !IMAGE_GEN_RE.test(message)) {
       intent.needsImageGeneration = false;
+      // Now also reset routeOverride since we determined it's not actually image gen
+      if (intent.routeOverride === 'gemini-3.1-flash-image') {
+        intent.routeOverride = 'none';
+      }
     }
   }
 
@@ -497,9 +502,17 @@ export async function POST(req: NextRequest) {
         { headers: { 'Content-Type': 'application/json' } }
       );
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`[ImageGen] Failed after retries: ${errMsg}`);
       Sentry.captureException(error, { tags: { action: 'image_generation' } });
+
+      const isSafetyBlock = errMsg.toLowerCase().includes('safety') || errMsg.toLowerCase().includes('blocked');
       return new Response(
-        JSON.stringify({ error: 'Image generation failed' }),
+        JSON.stringify({
+          error: isSafetyBlock
+            ? 'Image generation was blocked by safety filters. Try rephrasing your request.'
+            : `Image generation failed: ${errMsg}`,
+        }),
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
     }
