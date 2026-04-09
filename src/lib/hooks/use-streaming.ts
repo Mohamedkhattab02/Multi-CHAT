@@ -11,6 +11,7 @@ interface SendMessageParams {
   model: ModelId;
   attachments?: Array<{
     url?: string;
+    storagePath?: string;
     type: string;
     name: string;
     size: number;

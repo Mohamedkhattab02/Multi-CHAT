@@ -114,39 +114,27 @@ async function extractPptxText(base64Data: string): Promise<string> {
   return parts.join('\n\n').slice(0, 8000);
 }
 
-async function uploadToSupabaseStorage(
-  userId: string,
-  fileName: string,
-  base64Data: string,
-  mimeType: string
-): Promise<string | null> {
+/**
+ * Download file from Supabase Storage and return base64 data.
+ * Used when client uploads via /api/upload (FormData) and only sends storagePath.
+ */
+async function downloadFromStorage(storagePath: string): Promise<string | null> {
   try {
-    // Use service client to bypass RLS for storage uploads
     const serviceClient = createServiceClient();
-    const buffer = Buffer.from(base64Data, 'base64');
-    const filePath = `${userId}/${Date.now()}_${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-
-    const { error } = await serviceClient.storage
+    const { data, error } = await serviceClient.storage
       .from('attachments')
-      .upload(filePath, buffer, {
-        contentType: mimeType,
-        upsert: false,
-      });
+      .download(storagePath);
 
-    if (error) {
-      console.error('[Storage Upload]', error.message);
-      Sentry.captureException(error, { tags: { action: 'storage_upload' } });
+    if (error || !data) {
+      console.error('[Storage Download]', error?.message);
       return null;
     }
 
-    const { data: urlData } = serviceClient.storage
-      .from('attachments')
-      .getPublicUrl(filePath);
-
-    return urlData.publicUrl;
+    const arrayBuffer = await data.arrayBuffer();
+    return Buffer.from(arrayBuffer).toString('base64');
   } catch (err) {
-    console.error('[Storage Upload] Unexpected error:', err);
-    Sentry.captureException(err, { tags: { action: 'storage_upload' } });
+    console.error('[Storage Download] Unexpected error:', err);
+    Sentry.captureException(err, { tags: { action: 'storage_download' } });
     return null;
   }
 }
@@ -243,18 +231,28 @@ export async function POST(req: NextRequest) {
   const documentProcessingPromises: Promise<DocProcessResult>[] = [];
   // Store uploaded file URLs to save in message attachments (instead of base64)
   const processedAttachments: Array<{ type: string; name: string; url?: string; size?: number }> = [];
+  // Map of resolved base64 data per attachment index (for image attachments used later in streaming)
+  const resolvedAttachmentData: Map<number, string> = new Map();
 
   if (attachments?.length) {
     const textParts: string[] = [];
-    for (const att of attachments) {
-      if (!att.data) continue;
+    for (let attIdx = 0; attIdx < attachments.length; attIdx++) {
+      const att = attachments[attIdx];
+      // Resolve file data: use base64 from body, or download from Storage
+      let fileData = att.data || null;
+      if (!fileData && att.storagePath) {
+        fileData = await downloadFromStorage(att.storagePath);
+      }
+      if (!fileData) continue;
 
-      // Upload file to Supabase Storage
-      const fileUrl = await uploadToSupabaseStorage(user.id, att.name || 'file', att.data, att.type);
+      // Store resolved data for later use (e.g., image attachments in streaming)
+      resolvedAttachmentData.set(attIdx, fileData);
+
+      // File is already in Supabase Storage (uploaded by /api/upload)
       processedAttachments.push({
         type: att.type,
         name: att.name || 'file',
-        url: fileUrl || undefined,
+        url: att.url || undefined,
         size: att.size,
       });
 
@@ -262,13 +260,13 @@ export async function POST(req: NextRequest) {
       if (att.type === 'application/pdf') {
         try {
           // PRIMARY: Gemini Vision — sees text, images, diagrams, tables visually
-          const vision = await extractWithVision(att.data, att.type, att.name || 'document.pdf');
+          const vision = await extractWithVision(fileData, att.type, att.name || 'document.pdf');
           let extractedText = vision.text;
 
           // FALLBACK: if Vision returned empty/too short, use traditional text extraction
           if (!extractedText || extractedText.trim().length < 50) {
             console.log(`[Extract] Vision returned little content for ${att.name}, falling back to pdf-parse`);
-            const fallbackText = await extractPdfText(att.data);
+            const fallbackText = await extractPdfText(fileData);
             if (fallbackText.trim().length > extractedText.trim().length) {
               extractedText = fallbackText;
             }
@@ -297,7 +295,7 @@ export async function POST(req: NextRequest) {
         att.type === 'application/msword'
       ) {
         try {
-          const extractedText = await extractDocxText(att.data);
+          const extractedText = await extractDocxText(fileData);
           if (extractedText.trim()) {
             textParts.push(`[Attached Document: ${att.name}]\n${extractedText}`);
             if (conversationId) {
@@ -324,9 +322,9 @@ export async function POST(req: NextRequest) {
         try {
           let sheetText: string;
           if (att.type === 'text/csv') {
-            sheetText = Buffer.from(att.data, 'base64').toString('utf-8').slice(0, 8000);
+            sheetText = Buffer.from(fileData, 'base64').toString('utf-8').slice(0, 8000);
           } else {
-            sheetText = extractSpreadsheetText(att.data);
+            sheetText = extractSpreadsheetText(fileData);
           }
           if (sheetText.trim()) {
             textParts.push(`[Attached Spreadsheet: ${att.name}]\n${sheetText}`);
@@ -348,7 +346,7 @@ export async function POST(req: NextRequest) {
         }
       } else if (att.type.startsWith('text/') || att.type === 'application/json' || att.type === 'application/xml') {
         try {
-          const textContent = Buffer.from(att.data, 'base64').toString('utf-8');
+          const textContent = Buffer.from(fileData, 'base64').toString('utf-8');
           textParts.push(`[Attached file: ${att.name}]\n${textContent.slice(0, 8000)}`);
           if (conversationId) {
             documentProcessingPromises.push(
@@ -369,7 +367,7 @@ export async function POST(req: NextRequest) {
         att.type === 'application/vnd.ms-powerpoint'
       ) {
         try {
-          const extractedText = await extractPptxText(att.data);
+          const extractedText = await extractPptxText(fileData);
           if (extractedText.trim()) {
             textParts.push(`[Attached Presentation: ${att.name}]\n${extractedText}`);
             if (conversationId) {
@@ -393,7 +391,7 @@ export async function POST(req: NextRequest) {
       } else if (!att.type.startsWith('image/')) {
         // Catch-all: try to read as UTF-8 text for unknown file types
         try {
-          const rawText = Buffer.from(att.data, 'base64').toString('utf-8');
+          const rawText = Buffer.from(fileData, 'base64').toString('utf-8');
           const nonPrintableRatio = (rawText.match(/[\x00-\x08\x0E-\x1F]/g) || []).length / rawText.length;
           if (nonPrintableRatio < 0.1 && rawText.trim().length > 0) {
             textParts.push(`[Attached file: ${att.name}]\n${rawText.slice(0, 8000)}`);
@@ -650,10 +648,12 @@ export async function POST(req: NextRequest) {
             if (actualModel === 'gemini-3.1-flash-image') {
               actualModel = 'gemini-3-flash';
             }
-            // Extract image attachments for Gemini vision
+            // Extract image attachments for Gemini vision (use pre-resolved data)
             const imageAttachments = (attachments || [])
-              .filter(a => a.type?.startsWith('image') && a.data)
-              .map(a => ({ type: a.type, data: a.data!, name: a.name }));
+              .map((a, idx) => ({ type: a.type, data: resolvedAttachmentData.get(idx), name: a.name }))
+              .filter((a): a is { type: string; data: string; name: string } =>
+                !!a.type?.startsWith('image') && !!a.data
+              );
 
             generator = streamGemini({
               systemPrompt,

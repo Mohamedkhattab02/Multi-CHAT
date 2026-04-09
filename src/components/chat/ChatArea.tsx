@@ -14,6 +14,7 @@ import { EmptyState } from './EmptyState';
 import { ChatHeaderMenu } from './ChatHeaderMenu';
 import { PanelLeft, Share2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { uploadFile } from '@/lib/utils/upload-file';
 
 interface ChatAreaProps {
   conversation: Conversation;
@@ -62,15 +63,17 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
     ) => {
       if (!text.trim() && attachments.length === 0) return;
 
-      // Convert file attachments to serializable format (base64)
+      // Upload files to Supabase Storage first (avoids Vercel 4.5MB body limit)
+      // Only send URL + storagePath to /api/chat — NO base64 in the JSON body
       const serializedAttachments = await Promise.all(
         attachments.map(async (att) => {
-          const data = await fileToBase64(att.file);
+          const uploaded = await uploadFile(att.file);
           return {
             type: att.type,
             name: att.name,
             size: att.size,
-            data,
+            url: uploaded.url,
+            storagePath: uploaded.storagePath,
           };
         })
       );
@@ -199,15 +202,3 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
   );
 }
 
-async function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      // Remove data URL prefix
-      resolve(result.split(',')[1]);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
