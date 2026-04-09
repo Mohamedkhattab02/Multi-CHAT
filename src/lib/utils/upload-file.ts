@@ -10,6 +10,7 @@ export interface UploadedFile {
   name: string;
   type: string;
   size: number;
+  extractedText?: string;
 }
 
 export async function uploadFile(file: File): Promise<UploadedFile> {

@@ -15,8 +15,9 @@ export const ChatMessageSchema = z.object({
         name: z.string().max(255),
         size: z.number(),
         url: z.string().url().optional(),
-        storagePath: z.string().max(500).optional(), // Supabase Storage path (used to download file server-side)
-        data: z.string().optional(), // base64 — only for small files or images; large files use storagePath
+        storagePath: z.string().max(500).optional(), // Supabase Storage path
+        extractedText: z.string().optional(), // Pre-extracted text from /api/upload
+        data: z.string().optional(), // base64 — only for small inline images
       })
     )
     .optional()

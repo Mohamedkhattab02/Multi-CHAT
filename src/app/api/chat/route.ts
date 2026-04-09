@@ -8,6 +8,9 @@
 //   Layer 3: Context Assembly (stable prefix + variable suffix)
 //   Layer 4: Generation (streaming + caching)
 //   Layer 5: Post-Processing (embed, summary, WM, anti-memory)
+//
+// NOTE: File upload + text extraction is handled by /api/upload.
+// This route receives pre-extracted text via attachments[].extractedText.
 // ============================================================
 
 import { NextRequest } from 'next/server';
@@ -28,95 +31,12 @@ import { updateWorkingMemory, type WorkingMemory } from '@/lib/memory/working-me
 import { detectAntiMemory } from '@/lib/memory/anti-memory';
 import { updateConversationFingerprint } from '@/lib/memory/conversation-fingerprint';
 import { ChatMessageSchema } from '@/lib/security/validate';
-import { extractWithVision } from '@/lib/ai/vision-extract';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
-import pdfParse from 'pdf-parse-new';
-import mammoth from 'mammoth';
-import * as XLSX from 'xlsx';
-import JSZip from 'jszip';
-
-async function extractPdfText(base64Data: string): Promise<string> {
-  const buffer = Buffer.from(base64Data, 'base64');
-
-  // Suppress noisy pdf.js font/page warnings (TT: CALL empty stack, fetchStandardFontData, etc.)
-  const originalWarn = console.warn;
-  const originalInfo = console.info;
-  const pdfNoisePattern = /TT:|getTextContent|fetchStandardFontData|standardFontDataUrl|page=\d+/;
-  console.warn = (...args: unknown[]) => {
-    const msg = String(args[0] || '');
-    if (pdfNoisePattern.test(msg)) return;
-    originalWarn.apply(console, args);
-  };
-  console.info = (...args: unknown[]) => {
-    const msg = String(args[0] || '');
-    if (pdfNoisePattern.test(msg)) return;
-    originalInfo.apply(console, args);
-  };
-
-  try {
-    const result = await pdfParse(buffer);
-    return result.text.slice(0, 8000);
-  } finally {
-    console.warn = originalWarn;
-    console.info = originalInfo;
-  }
-}
-
-async function extractDocxText(base64Data: string): Promise<string> {
-  const buffer = Buffer.from(base64Data, 'base64');
-  const result = await mammoth.extractRawText({ buffer });
-  return result.value.slice(0, 8000);
-}
-
-function extractSpreadsheetText(base64Data: string): string {
-  const buffer = Buffer.from(base64Data, 'base64');
-  const workbook = XLSX.read(buffer, { type: 'buffer' });
-  const parts: string[] = [];
-  for (const sheetName of workbook.SheetNames.slice(0, 5)) {
-    const sheet = workbook.Sheets[sheetName];
-    const csv = XLSX.utils.sheet_to_csv(sheet);
-    parts.push(`[Sheet: ${sheetName}]\n${csv}`);
-  }
-  return parts.join('\n\n').slice(0, 8000);
-}
-
-async function extractPptxText(base64Data: string): Promise<string> {
-  const buffer = Buffer.from(base64Data, 'base64');
-  const zip = await JSZip.loadAsync(buffer);
-  const parts: string[] = [];
-
-  // PPTX slides are stored as ppt/slides/slide1.xml, slide2.xml, etc.
-  const slideFiles = Object.keys(zip.files)
-    .filter(name => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
-    .sort((a, b) => {
-      const numA = parseInt(a.match(/slide(\d+)/)?.[1] || '0');
-      const numB = parseInt(b.match(/slide(\d+)/)?.[1] || '0');
-      return numA - numB;
-    });
-
-  for (const slideName of slideFiles.slice(0, 50)) {
-    const xml = await zip.files[slideName].async('text');
-    // Extract text from <a:t> tags (DrawingML text runs)
-    const texts: string[] = [];
-    const regex = /<a:t[^>]*>([\s\S]*?)<\/a:t>/g;
-    let match;
-    while ((match = regex.exec(xml)) !== null) {
-      const text = match[1].trim();
-      if (text) texts.push(text);
-    }
-    if (texts.length > 0) {
-      const slideNum = slideName.match(/slide(\d+)/)?.[1] || '?';
-      parts.push(`[Slide ${slideNum}]\n${texts.join(' ')}`);
-    }
-  }
-
-  return parts.join('\n\n').slice(0, 8000);
-}
 
 /**
  * Download file from Supabase Storage and return base64 data.
- * Used when client uploads via /api/upload (FormData) and only sends storagePath.
+ * Only used for image attachments that need inline data for Gemini vision.
  */
 async function downloadFromStorage(storagePath: string): Promise<string | null> {
   try {
@@ -225,30 +145,19 @@ export async function POST(req: NextRequest) {
     a.type?.startsWith('image')
   );
 
-  // Extract text content from attachments + upload to Supabase Storage
+  // Use pre-extracted text from /api/upload (no heavy processing here)
   let enrichedMessage = message;
   type DocProcessResult = { filename: string; summary: string; chunk_count: number; key_sections: string[] };
   const documentProcessingPromises: Promise<DocProcessResult>[] = [];
-  // Store uploaded file URLs to save in message attachments (instead of base64)
   const processedAttachments: Array<{ type: string; name: string; url?: string; size?: number }> = [];
-  // Map of resolved base64 data per attachment index (for image attachments used later in streaming)
+  // Resolved base64 data for image attachments (needed for Gemini vision in streaming)
   const resolvedAttachmentData: Map<number, string> = new Map();
 
   if (attachments?.length) {
     const textParts: string[] = [];
     for (let attIdx = 0; attIdx < attachments.length; attIdx++) {
       const att = attachments[attIdx];
-      // Resolve file data: use base64 from body, or download from Storage
-      let fileData = att.data || null;
-      if (!fileData && att.storagePath) {
-        fileData = await downloadFromStorage(att.storagePath);
-      }
-      if (!fileData) continue;
 
-      // Store resolved data for later use (e.g., image attachments in streaming)
-      resolvedAttachmentData.set(attIdx, fileData);
-
-      // File is already in Supabase Storage (uploaded by /api/upload)
       processedAttachments.push({
         type: att.type,
         name: att.name || 'file',
@@ -256,162 +165,46 @@ export async function POST(req: NextRequest) {
         size: att.size,
       });
 
-      // ── Extract content: Vision-first for PDFs, fallback to text extraction ──
-      if (att.type === 'application/pdf') {
-        try {
-          // PRIMARY: Gemini Vision — sees text, images, diagrams, tables visually
-          const vision = await extractWithVision(fileData, att.type, att.name || 'document.pdf');
-          let extractedText = vision.text;
+      // For image attachments: download base64 from Storage for Gemini vision
+      if (att.type.startsWith('image/') && att.storagePath) {
+        const imageData = await downloadFromStorage(att.storagePath);
+        if (imageData) {
+          resolvedAttachmentData.set(attIdx, imageData);
+        }
+        continue;
+      }
 
-          // FALLBACK: if Vision returned empty/too short, use traditional text extraction
-          if (!extractedText || extractedText.trim().length < 50) {
-            console.log(`[Extract] Vision returned little content for ${att.name}, falling back to pdf-parse`);
-            const fallbackText = await extractPdfText(fileData);
-            if (fallbackText.trim().length > extractedText.trim().length) {
-              extractedText = fallbackText;
-            }
-          }
+      // For non-image attachments: use pre-extracted text from /api/upload
+      const extractedText = att.extractedText || '';
+      if (!extractedText.trim()) {
+        textParts.push(`[Attached file: ${att.name}]`);
+        continue;
+      }
 
-          if (extractedText.trim()) {
-            textParts.push(`[Attached PDF: ${att.name}]\n${extractedText}`);
-            if (conversationId) {
-              documentProcessingPromises.push(
-                processDocument({
-                  userId: user.id,
-                  conversationId,
-                  fileName: att.name || 'document.pdf',
-                  content: extractedText,
-                  fileType: 'pdf',
-                })
-              );
-            }
-          }
-        } catch (err) {
-          Sentry.captureException(err, { tags: { action: 'pdf_extract' } });
-          textParts.push(`[Attached PDF: ${att.name} — could not extract text]`);
-        }
-      } else if (
-        att.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-        att.type === 'application/msword'
-      ) {
-        try {
-          const extractedText = await extractDocxText(fileData);
-          if (extractedText.trim()) {
-            textParts.push(`[Attached Document: ${att.name}]\n${extractedText}`);
-            if (conversationId) {
-              documentProcessingPromises.push(
-                processDocument({
-                  userId: user.id,
-                  conversationId,
-                  fileName: att.name || 'document.docx',
-                  content: extractedText,
-                  fileType: 'docx',
-                })
-              );
-            }
-          }
-        } catch (err) {
-          Sentry.captureException(err, { tags: { action: 'docx_extract' } });
-          textParts.push(`[Attached Document: ${att.name} — could not extract text]`);
-        }
-      } else if (
-        att.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-        att.type === 'application/vnd.ms-excel' ||
-        att.type === 'text/csv'
-      ) {
-        try {
-          let sheetText: string;
-          if (att.type === 'text/csv') {
-            sheetText = Buffer.from(fileData, 'base64').toString('utf-8').slice(0, 8000);
-          } else {
-            sheetText = extractSpreadsheetText(fileData);
-          }
-          if (sheetText.trim()) {
-            textParts.push(`[Attached Spreadsheet: ${att.name}]\n${sheetText}`);
-            if (conversationId) {
-              documentProcessingPromises.push(
-                processDocument({
-                  userId: user.id,
-                  conversationId,
-                  fileName: att.name || 'spreadsheet.xlsx',
-                  content: sheetText,
-                  fileType: att.type,
-                })
-              );
-            }
-          }
-        } catch (err) {
-          Sentry.captureException(err, { tags: { action: 'spreadsheet_extract' } });
-          textParts.push(`[Attached Spreadsheet: ${att.name} — could not extract data]`);
-        }
-      } else if (att.type.startsWith('text/') || att.type === 'application/json' || att.type === 'application/xml') {
-        try {
-          const textContent = Buffer.from(fileData, 'base64').toString('utf-8');
-          textParts.push(`[Attached file: ${att.name}]\n${textContent.slice(0, 8000)}`);
-          if (conversationId) {
-            documentProcessingPromises.push(
-              processDocument({
-                userId: user.id,
-                conversationId,
-                fileName: att.name || 'file.txt',
-                content: textContent,
-                fileType: att.type,
-              })
-            );
-          }
-        } catch {
-          textParts.push(`[Attached file: ${att.name} — could not read]`);
-        }
-      } else if (
-        att.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
-        att.type === 'application/vnd.ms-powerpoint'
-      ) {
-        try {
-          const extractedText = await extractPptxText(fileData);
-          if (extractedText.trim()) {
-            textParts.push(`[Attached Presentation: ${att.name}]\n${extractedText}`);
-            if (conversationId) {
-              documentProcessingPromises.push(
-                processDocument({
-                  userId: user.id,
-                  conversationId,
-                  fileName: att.name || 'presentation.pptx',
-                  content: extractedText,
-                  fileType: 'pptx',
-                })
-              );
-            }
-          } else {
-            textParts.push(`[Attached Presentation: ${att.name} — no text content found]`);
-          }
-        } catch (err) {
-          Sentry.captureException(err, { tags: { action: 'pptx_extract' } });
-          textParts.push(`[Attached Presentation: ${att.name} — could not extract text]`);
-        }
-      } else if (!att.type.startsWith('image/')) {
-        // Catch-all: try to read as UTF-8 text for unknown file types
-        try {
-          const rawText = Buffer.from(fileData, 'base64').toString('utf-8');
-          const nonPrintableRatio = (rawText.match(/[\x00-\x08\x0E-\x1F]/g) || []).length / rawText.length;
-          if (nonPrintableRatio < 0.1 && rawText.trim().length > 0) {
-            textParts.push(`[Attached file: ${att.name}]\n${rawText.slice(0, 8000)}`);
-            if (conversationId) {
-              documentProcessingPromises.push(
-                processDocument({
-                  userId: user.id,
-                  conversationId,
-                  fileName: att.name || 'file',
-                  content: rawText,
-                  fileType: att.type,
-                })
-              );
-            }
-          } else {
-            textParts.push(`[Attached file: ${att.name} — binary file, text extraction not supported]`);
-          }
-        } catch {
-          textParts.push(`[Attached file: ${att.name}]`);
-        }
+      // Determine label based on type
+      let label = 'file';
+      if (att.type === 'application/pdf') label = 'PDF';
+      else if (att.type.includes('word') || att.type === 'application/msword') label = 'Document';
+      else if (att.type.includes('spreadsheet') || att.type.includes('excel') || att.type === 'text/csv') label = 'Spreadsheet';
+      else if (att.type.includes('presentation') || att.type.includes('powerpoint')) label = 'Presentation';
+
+      textParts.push(`[Attached ${label}: ${att.name}]\n${extractedText}`);
+
+      // Queue document processing (chunking + embedding) for RAG
+      if (conversationId) {
+        const fileType = att.type === 'application/pdf' ? 'pdf'
+          : att.type.includes('word') ? 'docx'
+          : att.type.includes('presentation') ? 'pptx'
+          : att.type;
+        documentProcessingPromises.push(
+          processDocument({
+            userId: user.id,
+            conversationId,
+            fileName: att.name || 'file',
+            content: extractedText,
+            fileType,
+          })
+        );
       }
     }
     if (textParts.length) {

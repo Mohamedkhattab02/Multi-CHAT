@@ -12,6 +12,7 @@ interface SendMessageParams {
   attachments?: Array<{
     url?: string;
     storagePath?: string;
+    extractedText?: string;
     type: string;
     name: string;
     size: number;
