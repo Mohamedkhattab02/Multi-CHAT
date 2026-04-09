@@ -32,7 +32,7 @@ const ClassificationSchema = z.object({
 
 export type ClassificationResult = z.infer<typeof ClassificationSchema>;
 
-const IMAGE_GEN_PATTERNS = /(צור תמונה|תייצר.*תמונה|תייצר.*צמונה|תעשה.*תמונה|תכין.*תמונה|צייר|ציור|תמונה של|generate image|create image|draw me|draw a|paint|illustrate|make a picture|make an image|design an image)/i;
+const IMAGE_GEN_PATTERNS = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make a picture|design)\b/i;
 const WEB_SEARCH_PATTERNS = /\b(מזג אוויר|weather|today|latest|current|news|חדשות|score|price|מחיר|שער|stock|search|חפש|what happened|who won)\b/i;
 
 // Fast language detection (no LLM)
