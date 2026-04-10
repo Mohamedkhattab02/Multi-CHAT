@@ -4,18 +4,45 @@ import { memo } from 'react';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { Square } from 'lucide-react';
+import type { StreamingStatus } from '@/lib/store/chat-store';
 
 interface StreamingMessageProps {
   content: string;
   model: string;
   routeOverride?: string | null;
+  streamingStatus?: StreamingStatus;
+  streamingStatusDetail?: string | null;
   onStop: () => void;
+}
+
+const STATUS_LABELS: Record<StreamingStatus, { he: string; en: string }> = {
+  idle: { he: 'מתחבר...', en: 'Connecting...' },
+  uploading: { he: 'שולח...', en: 'Sending...' },
+  classifying: { he: 'מנתח את ההודעה...', en: 'Analyzing message...' },
+  searching_memory: { he: 'מחפש בזיכרון ובמסמכים...', en: 'Searching memory & documents...' },
+  generating: { he: 'כותב תשובה...', en: 'Writing response...' },
+  processing: { he: 'מעבד...', en: 'Processing...' },
+  extracting_document: { he: 'מחלץ טקסט מהמסמך...', en: 'Extracting document text...' },
+  extracting_pages: { he: 'קורא עמודים...', en: 'Reading pages...' },
+  analyzing_images: { he: 'מנתח תמונות מוטמעות...', en: 'Analyzing embedded images...' },
+};
+
+function getStatusLabel(status: StreamingStatus): string {
+  const labels = STATUS_LABELS[status] || STATUS_LABELS.idle;
+  // Detect language preference from document direction
+  if (typeof document !== 'undefined') {
+    const dir = document.documentElement.dir || document.documentElement.getAttribute('dir');
+    if (dir === 'rtl') return labels.he;
+  }
+  return labels.he; // Default to Hebrew since this is a Hebrew-primary app
 }
 
 export const StreamingMessage = memo(function StreamingMessage({
   content,
   model,
   routeOverride,
+  streamingStatus = 'idle',
+  streamingStatusDetail,
   onStop,
 }: StreamingMessageProps) {
   const modelInfo = MODELS[model as ModelId];
@@ -60,7 +87,10 @@ export const StreamingMessage = memo(function StreamingMessage({
                 <span className="w-1.5 h-1.5 rounded-full bg-[var(--muted-foreground)] animate-pulse-subtle" style={{ animationDelay: '200ms' }} />
                 <span className="w-1.5 h-1.5 rounded-full bg-[var(--muted-foreground)] animate-pulse-subtle" style={{ animationDelay: '400ms' }} />
               </div>
-              <span className="text-xs">Thinking...</span>
+              <span className="text-xs">
+                {getStatusLabel(streamingStatus)}
+                {streamingStatusDetail ? ` (${streamingStatusDetail})` : ''}
+              </span>
             </div>
           )}
         </div>

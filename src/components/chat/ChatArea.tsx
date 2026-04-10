@@ -51,6 +51,8 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
   const {
     isStreaming,
     streamingContent,
+    streamingStatus,
+    streamingStatusDetail,
     routeOverride,
     sendMessage,
     stopStreaming,
@@ -63,27 +65,11 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
     ) => {
       if (!text.trim() && attachments.length === 0) return;
 
-      // Upload files to Supabase Storage + extract text (avoids Vercel body limit & timeout)
-      const serializedAttachments = await Promise.all(
-        attachments.map(async (att) => {
-          const uploaded = await uploadFile(att.file);
-          return {
-            type: att.type,
-            name: att.name,
-            size: att.size,
-            url: uploaded.url,
-            storagePath: uploaded.storagePath,
-            extractedText: uploaded.extractedText,
-          };
-        })
-      );
-
-      // Immediately show user message (optimistic) with file previews
+      // IMMEDIATELY show user message (optimistic) — before any upload
       const optimisticAttachments = attachments.map((att) => ({
         type: att.type,
         name: att.name,
         size: att.size,
-        // For images, create a blob URL for immediate preview
         ...(att.type.startsWith('image/')
           ? { url: URL.createObjectURL(att.file) }
           : {}),
@@ -102,6 +88,21 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
       addMessages([optimisticUserMsg]);
 
       try {
+        // Upload files to Supabase Storage (fast — no text extraction)
+        // Text extraction happens server-side in /api/chat
+        const serializedAttachments = await Promise.all(
+          attachments.map(async (att) => {
+            const uploaded = await uploadFile(att.file);
+            return {
+              type: att.type,
+              name: att.name,
+              size: att.size,
+              url: uploaded.url,
+              storagePath: uploaded.storagePath,
+            };
+          })
+        );
+
         await sendMessage({
           message: text,
           conversationId: conversation.id,
@@ -185,6 +186,8 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
           streamingContent={streamingContent}
           streamingModel={selectedModel}
           routeOverride={routeOverride}
+          streamingStatus={streamingStatus}
+          streamingStatusDetail={streamingStatusDetail}
           onStopStreaming={stopStreaming}
           onRegenerate={handleRegenerate}
           onDelete={handleDeleteMessage}
@@ -201,4 +204,3 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
     </div>
   );
 }
-

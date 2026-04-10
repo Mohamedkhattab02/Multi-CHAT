@@ -99,7 +99,7 @@ export default function NewChatPage() {
         };
         setMessages((prev) => [...prev, optimisticUserMsg]);
 
-        // Upload files to Supabase Storage + extract text (avoids Vercel body limit & timeout)
+        // Upload files to Supabase Storage (fast — text extraction happens server-side)
         const serializedAttachments = await Promise.all(
           attachments.map(async (att) => {
             const uploaded = await uploadFile(att.file);
@@ -109,7 +109,6 @@ export default function NewChatPage() {
               size: att.size,
               url: uploaded.url,
               storagePath: uploaded.storagePath,
-              extractedText: uploaded.extractedText,
             };
           })
         );

@@ -5,6 +5,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { MessageBubble } from './MessageBubble';
 import { StreamingMessage } from './StreamingMessage';
 import type { Message } from '@/lib/supabase/types';
+import type { StreamingStatus } from '@/lib/store/chat-store';
 
 interface MessageListProps {
   messages: Message[];
@@ -12,6 +13,8 @@ interface MessageListProps {
   streamingContent: string;
   streamingModel: string;
   routeOverride?: string | null;
+  streamingStatus?: StreamingStatus;
+  streamingStatusDetail?: string | null;
   onStopStreaming: () => void;
   onRegenerate?: (messageId: string) => void;
   onDelete?: (messageId: string) => void;
@@ -23,6 +26,8 @@ export function MessageList({
   streamingContent,
   streamingModel,
   routeOverride,
+  streamingStatus,
+  streamingStatusDetail,
   onStopStreaming,
   onRegenerate,
   onDelete,
@@ -93,6 +98,8 @@ export function MessageList({
                       content={streamingContent}
                       model={streamingModel}
                       routeOverride={routeOverride}
+                      streamingStatus={streamingStatus}
+                      streamingStatusDetail={streamingStatusDetail}
                       onStop={onStopStreaming}
                     />
                   ) : (

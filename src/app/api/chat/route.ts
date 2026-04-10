@@ -9,6 +9,11 @@
 //   Layer 4: Generation (streaming + caching)
 //   Layer 5: Post-Processing (embed, summary, WM, anti-memory)
 //
+// V5 PERF: Stream opens immediately after auth. Heavy work
+//          (classification, RAG, doc processing) runs inside
+//          the stream with real-time status events so the client
+//          sees progress instantly instead of a blank screen.
+//
 // NOTE: File upload + text extraction is handled by /api/upload.
 // This route receives pre-extracted text via attachments[].extractedText.
 // ============================================================
@@ -31,6 +36,7 @@ import { updateWorkingMemory, type WorkingMemory } from '@/lib/memory/working-me
 import { detectAntiMemory } from '@/lib/memory/anti-memory';
 import { updateConversationFingerprint } from '@/lib/memory/conversation-fingerprint';
 import { ChatMessageSchema } from '@/lib/security/validate';
+import { extractTextFromFile } from '@/lib/utils/extract-text';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 
@@ -60,7 +66,7 @@ async function downloadFromStorage(storagePath: string): Promise<string | null> 
 }
 
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 export async function POST(req: NextRequest) {
   // ═══ SECURITY: Input Validation (Zod) ═══
@@ -125,166 +131,31 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Increment message count
-  await supabase
-    .from('users')
-    .update({
+  // ═══ SPECIAL ROUTE: Image Generation (detect early, before streaming) ═══
+  const hasImageAttachment = attachments?.some((a) => a.type?.startsWith('image'));
+  const IMAGE_GEN_PATTERNS_EARLY = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make a picture|design)\b/i;
+  const isLikelyImageGen = !hasImageAttachment && IMAGE_GEN_PATTERNS_EARLY.test(message);
+
+  if (isLikelyImageGen) {
+    // Increment message count
+    await supabase.from('users').update({
       messages_today: (userProfile?.messages_today || 0) + 1,
       last_reset_date: new Date().toISOString().split('T')[0],
-    })
-    .eq('id', user.id);
+    }).eq('id', user.id);
 
-  // ═══ LAYER 0: MEMORY INVALIDATION ═══
-  if (conversationId) {
-    detectAndHandleInvalidation(user.id, conversationId, message)
-      .catch(err => Sentry.captureException(err, { tags: { action: 'invalidation' } }));
-  }
-
-  // ═══ LAYER 1: INPUT PROCESSING + SMART ROUTING ═���═
-  const hasImageAttachment = attachments?.some((a) =>
-    a.type?.startsWith('image')
-  );
-
-  // Use pre-extracted text from /api/upload (no heavy processing here)
-  let enrichedMessage = message;
-  type DocProcessResult = { filename: string; summary: string; chunk_count: number; key_sections: string[] };
-  const documentProcessingPromises: Promise<DocProcessResult>[] = [];
-  const processedAttachments: Array<{ type: string; name: string; url?: string; size?: number }> = [];
-  // Resolved base64 data for image attachments (needed for Gemini vision in streaming)
-  const resolvedAttachmentData: Map<number, string> = new Map();
-
-  if (attachments?.length) {
-    const textParts: string[] = [];
-    for (let attIdx = 0; attIdx < attachments.length; attIdx++) {
-      const att = attachments[attIdx];
-
-      processedAttachments.push({
-        type: att.type,
-        name: att.name || 'file',
-        url: att.url || undefined,
-        size: att.size,
-      });
-
-      // For image attachments: download base64 from Storage for Gemini vision
-      if (att.type.startsWith('image/') && att.storagePath) {
-        const imageData = await downloadFromStorage(att.storagePath);
-        if (imageData) {
-          resolvedAttachmentData.set(attIdx, imageData);
-        }
-        continue;
-      }
-
-      // For non-image attachments: use pre-extracted text from /api/upload
-      const extractedText = att.extractedText || '';
-      if (!extractedText.trim()) {
-        textParts.push(`[Attached file: ${att.name}]`);
-        continue;
-      }
-
-      // Determine label based on type
-      let label = 'file';
-      if (att.type === 'application/pdf') label = 'PDF';
-      else if (att.type.includes('word') || att.type === 'application/msword') label = 'Document';
-      else if (att.type.includes('spreadsheet') || att.type.includes('excel') || att.type === 'text/csv') label = 'Spreadsheet';
-      else if (att.type.includes('presentation') || att.type.includes('powerpoint')) label = 'Presentation';
-
-      textParts.push(`[Attached ${label}: ${att.name}]\n${extractedText}`);
-
-      // Queue document processing (chunking + embedding) for RAG
-      if (conversationId) {
-        const fileType = att.type === 'application/pdf' ? 'pdf'
-          : att.type.includes('word') ? 'docx'
-          : att.type.includes('presentation') ? 'pptx'
-          : att.type;
-        documentProcessingPromises.push(
-          processDocument({
-            userId: user.id,
-            conversationId,
-            fileName: att.name || 'file',
-            content: extractedText,
-            fileType,
-          })
-        );
-      }
-    }
-    if (textParts.length) {
-      enrichedMessage = `${message}\n\n---\n${textParts.join('\n\n')}`;
-    }
-  }
-
-  // CRITICAL: Await document processing BEFORE RAG runs,
-  // so that document chunks exist in the DB when RAG queries them.
-  // Run classification in parallel with document processing to save time.
-  const [docResults, rawIntent] = await Promise.all([
-    documentProcessingPromises.length > 0
-      ? Promise.allSettled(documentProcessingPromises).then(results =>
-          results
-            .filter((r): r is PromiseFulfilledResult<DocProcessResult> => r.status === 'fulfilled')
-            .map(r => r.value)
-        )
-      : Promise.resolve([] as DocProcessResult[]),
-    classifyIntent(enrichedMessage, hasImageAttachment),
-  ]);
-
-  // ═══ GUARD: Only allow image routing when actual image files are attached ═══
-  // PDFs with drawings/illustrations must NOT be routed to the image model
-  const intent = { ...rawIntent };
-  if (!hasImageAttachment) {
-    intent.hasImageInput = false;
-    if (intent.routeOverride === 'gemini-3.1-flash-image') {
-      intent.routeOverride = 'none';
-    }
-    if (intent.intent === 'image_analysis') {
-      intent.intent = 'analysis';
-    }
-    // Only allow needsImageGeneration if user explicitly asked to generate an image
-    // (not just because a document mentions images/drawings)
-    const IMAGE_GEN_RE = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make a picture|design)\b/i;
-    if (intent.needsImageGeneration && !IMAGE_GEN_RE.test(message)) {
-      intent.needsImageGeneration = false;
-    }
-  }
-
-  // Log document processing results
-  if (docResults.length > 0) {
-    const totalChunks = docResults.reduce((sum, d) => sum + d.chunk_count, 0);
-    console.log(`[DocProcess] Processed ${docResults.length} documents, ${totalChunks} total chunks`);
-  }
-
-  // ═══ SPECIAL ROUTE: Image Generation ═══
-  if (intent.needsImageGeneration) {
     try {
       const imageResult = await generateImage(message);
-
       if (conversationId) {
         await supabase.from('messages').insert({
-          conversation_id: conversationId,
-          role: 'user',
-          content: message,
-          model: 'gemini-3.1-flash-image',
+          conversation_id: conversationId, role: 'user', content: message, model: 'gemini-3.1-flash-image',
         });
         await supabase.from('messages').insert({
-          conversation_id: conversationId,
-          role: 'assistant',
-          content: imageResult.revisedPrompt,
-          model: 'gemini-3.1-flash-image',
-          attachments: [
-            {
-              type: imageResult.mimeType,
-              data: imageResult.imageBase64,
-              name: 'generated-image.png',
-            },
-          ],
+          conversation_id: conversationId, role: 'assistant', content: imageResult.revisedPrompt, model: 'gemini-3.1-flash-image',
+          attachments: [{ type: imageResult.mimeType, data: imageResult.imageBase64, name: 'generated-image.png' }],
         });
       }
-
       return new Response(
-        JSON.stringify({
-          type: 'image',
-          image: imageResult.imageBase64,
-          mimeType: imageResult.mimeType,
-          text: imageResult.revisedPrompt,
-        }),
+        JSON.stringify({ type: 'image', image: imageResult.imageBase64, mimeType: imageResult.mimeType, text: imageResult.revisedPrompt }),
         { headers: { 'Content-Type': 'application/json' } }
       );
     } catch (error) {
@@ -296,130 +167,332 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Determine actual model
-  let actualModel: string;
-  if (intent.routeOverride !== 'none') {
-    actualModel = intent.routeOverride;
-  } else {
-    actualModel = routeByComplexity(model, intent.complexity);
-  }
-
-  // ═══ LOAD CONVERSATION DATA FIRST (needed to decide RAG) ═══
-  let conversation = null;
-  let recentHistory: Array<{ role: string; content: string }> = [];
-  let totalMessageCount = 0;
-  let workingMemory: WorkingMemory | null = null;
-  let structuredSummary: StructuredSummary | null = null;
-  let documentRegistry: Array<{ filename: string; summary: string }> = [];
-
-  if (conversationId) {
-    const { data: conv } = await supabase
-      .from('conversations')
-      .select('id, user_id, title, model, summary, system_prompt, topic, message_count, is_pinned, folder_id, created_at, updated_at, working_memory, document_registry, structured_summary, gemini_cache_name, key_entities, key_topics')
-      .eq('id', conversationId)
-      .single();
-    conversation = conv;
-    totalMessageCount = conv?.message_count || 0;
-
-    // Extract V4 fields
-    workingMemory = conv?.working_memory as unknown as WorkingMemory | null;
-    structuredSummary = conv?.structured_summary as unknown as StructuredSummary | null;
-    documentRegistry = (conv?.document_registry as unknown as Array<{ filename: string; summary: string }>) || [];
-
-    // Fetch recent messages (adaptive window applied in assembler)
-    const { data: msgs } = await supabase
-      .from('messages')
-      .select('role, content, content_blocks')
-      .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: false })
-      .limit(10);
-    recentHistory = (msgs || []).reverse();
-
-    // Save user message to DB (with Storage URLs instead of base64)
-    await supabase.from('messages').insert({
-      conversation_id: conversationId,
-      role: 'user',
-      content: message,
-      model: actualModel,
-      attachments: processedAttachments.length > 0 ? processedAttachments : [],
-    });
-  }
-
-  // ═══ LAYER 2: MEMORY RETRIEVAL (RAG) — V4 8-step pipeline ═══
-  // If documents were just processed, refresh documentRegistry from DB
-  // (on first upload, the registry loaded earlier was empty)
-  if (docResults.length > 0 && conversationId) {
-    const { data: refreshedConv } = await supabase
-      .from('conversations')
-      .select('document_registry')
-      .eq('id', conversationId)
-      .single();
-    if (refreshedConv?.document_registry) {
-      documentRegistry = (refreshedConv.document_registry as unknown as Array<{ filename: string; summary: string }>) || [];
-    }
-  }
-
-  // Run RAG when classifier says so, OR when documents exist AND user references them
-  // Don't force RAG for unrelated general questions just because documents exist
-  const hasDocuments = documentRegistry.length > 0 || docResults.some(d => d.chunk_count > 0);
-  const shouldRunRAG = (intent.needsRAG || (hasDocuments && intent.referencesDocument)) && !!conversationId;
-
-  let ragContext: RetrievedContext | null = null;
-  if (shouldRunRAG && conversationId) {
-    try {
-      const conversationContext = recentHistory
-        .slice(-3)
-        .map(m => `${m.role}: ${m.content.slice(0, 200)}`)
-        .join('\n');
-
-      // If conversation has documents, force the classifier hints
-      // so the RAG pipeline runs document retrieval
-      const ragClassification = hasDocuments
-        ? { ...intent, referencesDocument: true, needsRAG: true }
-        : intent;
-
-      ragContext = await retrieveMemories({
-        userId: user.id,
-        conversationId,
-        message,
-        conversationContext,
-        classification: ragClassification,
-      });
-    } catch (err) {
-      Sentry.captureException(err, { tags: { action: 'rag_retrieval' } });
-    }
-  }
-
-  // Ensure ragContext includes the latest documentRegistry
-  // (important on first upload when ragContext may be null or have empty registry)
-  if (ragContext && documentRegistry.length > 0 && ragContext.documentRegistry.length === 0) {
-    ragContext.documentRegistry = documentRegistry;
-  }
-
-  const { systemPrompt, messages: assembledMessages } = assembleContext({
-    model: actualModel,
-    userProfile: userProfile ? {
-      name: userProfile.name,
-      language: userProfile.language,
-      expertise: userProfile.expertise,
-    } : null,
-    ragContext,
-    messages: [...recentHistory, { role: 'user', content: enrichedMessage }],
-    rollingSummary: conversation?.summary,
-    structuredSummary,
-    workingMemory,
-    classification: intent,
-    language: intent.language,
-  });
-
-  // ═══ LAYER 4: GENERATION (STREAMING) with AbortController ═══
+  // ═══ OPEN SSE STREAM IMMEDIATELY — all heavy work runs inside ═══
+  // Client gets the connection right away and sees real-time status updates
   const encoder = new TextEncoder();
   const abortController = new AbortController();
   req.signal.addEventListener('abort', () => abortController.abort());
 
+  function sendSSE(controller: ReadableStreamDefaultController, data: Record<string, unknown>) {
+    if (!abortController.signal.aborted) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+    }
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
+      const heartbeatInterval = setInterval(() => {
+        if (!abortController.signal.aborted) {
+          controller.enqueue(encoder.encode(': heartbeat\n\n'));
+        }
+      }, 10000);
+
       try {
+        // ═══ PHASE 1: STATUS -> processing (if attachments) or classifying ═══
+        sendSSE(controller, { status: attachments?.length ? 'processing' : 'classifying' });
+
+        // Increment message count (fire and forget — don't block)
+        supabase.from('users').update({
+          messages_today: (userProfile?.messages_today || 0) + 1,
+          last_reset_date: new Date().toISOString().split('T')[0],
+        }).eq('id', user!.id).then(() => {});
+
+        // Fire-and-forget: memory invalidation
+        if (conversationId) {
+          detectAndHandleInvalidation(user!.id, conversationId, message)
+            .catch(err => Sentry.captureException(err, { tags: { action: 'invalidation' } }));
+        }
+
+        // ═══ INPUT PROCESSING ═══
+        let enrichedMessage = message;
+        type DocProcessResult = { filename: string; summary: string; chunk_count: number; key_sections: string[] };
+        const documentProcessingPromises: Promise<DocProcessResult>[] = [];
+        const processedAttachments: Array<{ type: string; name: string; url?: string; size?: number }> = [];
+        const resolvedAttachmentData: Map<number, string> = new Map();
+        const imageDownloadPromises: Array<{ idx: number; promise: Promise<string | null> }> = [];
+
+        // Queue for text extraction: download from storage + extract in parallel
+        const textExtractionPromises: Array<{
+          idx: number;
+          att: typeof attachments[number];
+          promise: Promise<string>;
+        }> = [];
+
+        if (attachments?.length) {
+          for (let attIdx = 0; attIdx < attachments.length; attIdx++) {
+            const att = attachments[attIdx];
+            processedAttachments.push({
+              type: att.type, name: att.name || 'file', url: att.url || undefined, size: att.size,
+            });
+
+            // Queue image downloads (don't await — will resolve in parallel)
+            if (att.type.startsWith('image/') && att.storagePath) {
+              imageDownloadPromises.push({ idx: attIdx, promise: downloadFromStorage(att.storagePath) });
+              continue;
+            }
+
+            // If extractedText was provided (legacy), use it directly
+            if (att.extractedText?.trim()) {
+              textExtractionPromises.push({
+                idx: attIdx,
+                att,
+                promise: Promise.resolve(att.extractedText),
+              });
+              continue;
+            }
+
+            // No extracted text — download from storage and extract server-side
+            if (att.storagePath && !att.type.startsWith('image/')) {
+              textExtractionPromises.push({
+                idx: attIdx,
+                att,
+                promise: (async () => {
+                  const base64 = await downloadFromStorage(att.storagePath!);
+                  if (!base64) return '';
+                  return extractTextFromFile(base64, att.type, att.name || 'file', (status, detail) => {
+                    sendSSE(controller, { status, statusDetail: detail });
+                  });
+                })(),
+              });
+            }
+          }
+        }
+
+        // ═══ MASSIVE PARALLEL PHASE ═══
+        // Run ALL independent operations at once:
+        // 1. Text extraction from storage (download + extract)
+        // 2. Image downloads from storage
+        // 3. Conversation data loading (conv metadata + recent messages)
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let conversation: any = null;
+        let recentHistory: Array<{ role: string; content: string }> = [];
+        let totalMessageCount = 0;
+        let workingMemory: WorkingMemory | null = null;
+        let structuredSummary: StructuredSummary | null = null;
+        let documentRegistry: Array<{ filename: string; summary: string }> = [];
+
+        const conversationLoadPromise = conversationId
+          ? (async () => {
+              const [convResult, msgsResult] = await Promise.all([
+                supabase
+                  .from('conversations')
+                  .select('id, user_id, title, model, summary, system_prompt, topic, message_count, is_pinned, folder_id, created_at, updated_at, working_memory, document_registry, structured_summary, gemini_cache_name, key_entities, key_topics')
+                  .eq('id', conversationId)
+                  .single(),
+                supabase
+                  .from('messages')
+                  .select('role, content, content_blocks')
+                  .eq('conversation_id', conversationId)
+                  .order('created_at', { ascending: false })
+                  .limit(10),
+              ]);
+              const conv = convResult.data;
+              conversation = conv;
+              totalMessageCount = conv?.message_count || 0;
+              workingMemory = conv?.working_memory as unknown as WorkingMemory | null;
+              structuredSummary = conv?.structured_summary as unknown as StructuredSummary | null;
+              documentRegistry = (conv?.document_registry as unknown as Array<{ filename: string; summary: string }>) || [];
+              recentHistory = (msgsResult.data || []).reverse();
+            })()
+          : Promise.resolve();
+
+        const textExtractionAllPromise = textExtractionPromises.length > 0
+          ? Promise.all(textExtractionPromises.map(async (item) => {
+              const text = await item.promise;
+              return { ...item, extractedText: text };
+            }))
+          : Promise.resolve([] as Array<{ idx: number; att: typeof attachments[number]; extractedText: string }>);
+
+        const imageDownloadAllPromise = imageDownloadPromises.length > 0
+          ? Promise.all(imageDownloadPromises.map(async ({ idx, promise }) => {
+              const data = await promise;
+              if (data) resolvedAttachmentData.set(idx, data);
+            }))
+          : Promise.resolve();
+
+        // Phase 1: text extraction + image downloads + conversation load (all parallel)
+        const [extractedTexts] = await Promise.all([
+          textExtractionAllPromise,
+          imageDownloadAllPromise,
+          conversationLoadPromise,
+        ]);
+
+        // Build enriched message from extracted texts
+        const textParts: string[] = [];
+        for (const { att, extractedText } of extractedTexts) {
+          if (!extractedText?.trim()) {
+            textParts.push(`[Attached file: ${att.name}]`);
+            continue;
+          }
+
+          let label = 'file';
+          if (att.type === 'application/pdf') label = 'PDF';
+          else if (att.type.includes('word') || att.type === 'application/msword') label = 'Document';
+          else if (att.type.includes('spreadsheet') || att.type.includes('excel') || att.type === 'text/csv') label = 'Spreadsheet';
+          else if (att.type.includes('presentation') || att.type.includes('powerpoint')) label = 'Presentation';
+
+          textParts.push(`[Attached ${label}: ${att.name}]\n${extractedText}`);
+
+          if (conversationId) {
+            const fileType = att.type === 'application/pdf' ? 'pdf'
+              : att.type.includes('word') ? 'docx'
+              : att.type.includes('presentation') ? 'pptx'
+              : att.type;
+            documentProcessingPromises.push(
+              processDocument({
+                userId: user!.id, conversationId, fileName: att.name || 'file', content: extractedText, fileType,
+              })
+            );
+          }
+        }
+        if (textParts.length) {
+          enrichedMessage = `${message}\n\n---\n${textParts.join('\n\n')}`;
+        }
+
+        // Phase 2: classification + doc processing (need enrichedMessage from phase 1)
+        sendSSE(controller, { status: 'classifying' });
+        const classificationPromise = classifyIntent(enrichedMessage, hasImageAttachment);
+
+        const docProcessPromise = documentProcessingPromises.length > 0
+          ? Promise.allSettled(documentProcessingPromises).then(results =>
+              results
+                .filter((r): r is PromiseFulfilledResult<DocProcessResult> => r.status === 'fulfilled')
+                .map(r => r.value)
+            )
+          : Promise.resolve([] as DocProcessResult[]);
+
+        const [docResults, rawIntent] = await Promise.all([
+          docProcessPromise,
+          classificationPromise,
+        ]).then(([docRes, classRes]) => [docRes, classRes] as const);
+
+        // ═══ GUARD: Only allow image routing when actual image files are attached ═══
+        const intent = { ...rawIntent };
+        if (!hasImageAttachment) {
+          intent.hasImageInput = false;
+          if (intent.routeOverride === 'gemini-3.1-flash-image') {
+            intent.routeOverride = 'none';
+          }
+          if (intent.intent === 'image_analysis') {
+            intent.intent = 'analysis';
+          }
+          const IMAGE_GEN_RE = /\b(צור תמונה|generate image|create image|draw|paint|illustrate|ציור|תמונה של|make a picture|design)\b/i;
+          if (intent.needsImageGeneration && !IMAGE_GEN_RE.test(message)) {
+            intent.needsImageGeneration = false;
+          }
+        }
+
+        // Handle image generation detected by classifier (rare — most caught by early check)
+        if (intent.needsImageGeneration) {
+          try {
+            const imageResult = await generateImage(message);
+            if (conversationId) {
+              await supabase.from('messages').insert({
+                conversation_id: conversationId, role: 'user', content: message, model: 'gemini-3.1-flash-image',
+              });
+              await supabase.from('messages').insert({
+                conversation_id: conversationId, role: 'assistant', content: imageResult.revisedPrompt, model: 'gemini-3.1-flash-image',
+                attachments: [{ type: imageResult.mimeType, data: imageResult.imageBase64, name: 'generated-image.png' }],
+              });
+            }
+            sendSSE(controller, { type: 'image', image: imageResult.imageBase64, mimeType: imageResult.mimeType, text: imageResult.revisedPrompt, done: true });
+          } catch (error) {
+            Sentry.captureException(error, { tags: { action: 'image_generation' } });
+            sendSSE(controller, { error: 'Image generation failed' });
+          }
+          clearInterval(heartbeatInterval);
+          controller.close();
+          return;
+        }
+
+        if (docResults.length > 0) {
+          const totalChunks = docResults.reduce((sum, d) => sum + d.chunk_count, 0);
+          console.log(`[DocProcess] Processed ${docResults.length} documents, ${totalChunks} total chunks`);
+        }
+
+        // Determine actual model
+        let actualModel: string;
+        if (intent.routeOverride !== 'none') {
+          actualModel = intent.routeOverride;
+        } else {
+          actualModel = routeByComplexity(model, intent.complexity);
+        }
+
+        // Save user message to DB (don't block streaming)
+        if (conversationId) {
+          supabase.from('messages').insert({
+            conversation_id: conversationId,
+            role: 'user',
+            content: message,
+            model: actualModel,
+            attachments: processedAttachments.length > 0 ? processedAttachments : [],
+          }).then(() => {});
+        }
+
+        // ═══ PHASE 2: STATUS -> searching_memory (RAG) ═══
+        if (docResults.length > 0 && conversationId) {
+          const { data: refreshedConv } = await supabase
+            .from('conversations')
+            .select('document_registry')
+            .eq('id', conversationId)
+            .single();
+          if (refreshedConv?.document_registry) {
+            documentRegistry = (refreshedConv.document_registry as unknown as Array<{ filename: string; summary: string }>) || [];
+          }
+        }
+
+        const hasDocuments = documentRegistry.length > 0 || docResults.some(d => d.chunk_count > 0);
+        const shouldRunRAG = (intent.needsRAG || (hasDocuments && intent.referencesDocument)) && !!conversationId;
+
+        let ragContext: RetrievedContext | null = null;
+        if (shouldRunRAG && conversationId) {
+          sendSSE(controller, { status: 'searching_memory' });
+          try {
+            const conversationContext = recentHistory
+              .slice(-3)
+              .map(m => `${m.role}: ${m.content.slice(0, 200)}`)
+              .join('\n');
+
+            const ragClassification = hasDocuments
+              ? { ...intent, referencesDocument: true, needsRAG: true }
+              : intent;
+
+            ragContext = await retrieveMemories({
+              userId: user!.id,
+              conversationId,
+              message,
+              conversationContext,
+              classification: ragClassification,
+            });
+          } catch (err) {
+            Sentry.captureException(err, { tags: { action: 'rag_retrieval' } });
+          }
+        }
+
+        if (ragContext && documentRegistry.length > 0 && ragContext.documentRegistry.length === 0) {
+          ragContext.documentRegistry = documentRegistry;
+        }
+
+        const { systemPrompt, messages: assembledMessages } = assembleContext({
+          model: actualModel,
+          userProfile: userProfile ? {
+            name: userProfile.name,
+            language: userProfile.language,
+            expertise: userProfile.expertise,
+          } : null,
+          ragContext,
+          messages: [...recentHistory, { role: 'user', content: enrichedMessage }],
+          rollingSummary: conversation?.summary,
+          structuredSummary,
+          workingMemory,
+          classification: intent,
+          language: intent.language,
+        });
+
+        // ═══ PHASE 3: STATUS -> generating ═══
+        sendSSE(controller, { status: 'generating' });
+
         let generator;
         switch (actualModel) {
           case 'gpt-5.1':
@@ -428,7 +501,7 @@ export async function POST(req: NextRequest) {
               systemPrompt,
               messages: assembledMessages,
               model: actualModel,
-              userId: user.id,
+              userId: user!.id,
               conversationId: conversationId || undefined,
               signal: abortController.signal,
             });
@@ -436,12 +509,9 @@ export async function POST(req: NextRequest) {
           case 'gemini-3.1-pro':
           case 'gemini-3-flash':
           case 'gemini-3.1-flash-image': {
-            // gemini-3.1-flash-image is only for image generation (handled above);
-            // if we reach here, fall back to gemini-3-flash for normal streaming
             if (actualModel === 'gemini-3.1-flash-image') {
               actualModel = 'gemini-3-flash';
             }
-            // Extract image attachments for Gemini vision (use pre-resolved data)
             const imageAttachments = (attachments || [])
               .map((a, idx) => ({ type: a.type, data: resolvedAttachmentData.get(idx), name: a.name }))
               .filter((a): a is { type: string; data: string; name: string } =>
@@ -453,7 +523,7 @@ export async function POST(req: NextRequest) {
               messages: assembledMessages,
               model: actualModel as 'gemini-3.1-pro' | 'gemini-3-flash',
               enableSearch: intent.needsInternet,
-              userId: user.id,
+              userId: user!.id,
               conversationId: conversationId || undefined,
               signal: abortController.signal,
               imageAttachments,
@@ -467,7 +537,7 @@ export async function POST(req: NextRequest) {
               systemPrompt,
               messages: assembledMessages,
               model: actualModel as 'glm-4.7' | 'glm-4.6',
-              userId: user.id,
+              userId: user!.id,
               conversationId: conversationId || undefined,
               signal: abortController.signal,
             });
@@ -476,44 +546,23 @@ export async function POST(req: NextRequest) {
             throw new Error(`Unknown model: ${actualModel}`);
         }
 
-        // Heartbeat to prevent timeout
-        const heartbeatInterval = setInterval(() => {
-          if (!abortController.signal.aborted) {
-            controller.enqueue(encoder.encode(': heartbeat\n\n'));
-          }
-        }, 15000);
-
         // Send routing info
         if (intent.routeOverride !== 'none') {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ routeOverride: actualModel })}\n\n`
-            )
-          );
+          sendSSE(controller, { routeOverride: actualModel });
         }
 
         for await (const event of generator) {
           if (abortController.signal.aborted) break;
 
           if (event.type === 'text') {
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({ text: event.text })}\n\n`
-              )
-            );
+            sendSSE(controller, { text: event.text });
           } else if (event.type === 'error') {
             console.error('[Model Error]', event.text);
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({ error: event.text })}\n\n`
-              )
-            );
+            sendSSE(controller, { error: event.text });
           } else if (event.type === 'done') {
-            clearInterval(heartbeatInterval);
-
-            // ═══ LAYER 5: POST-PROCESSING (V4) ═══
+            // ═══ LAYER 5: POST-PROCESSING (V4) — all fire-and-forget ═══
             if (conversationId) {
-              // Save assistant message
+              // Save assistant message (await to ensure persistence)
               await supabase.from('messages').insert({
                 conversation_id: conversationId,
                 role: 'assistant',
@@ -524,113 +573,54 @@ export async function POST(req: NextRequest) {
 
               const messageCount = totalMessageCount + 2;
 
-              // 1. Promote pre-embed from RAG step
+              // All post-processing is fire-and-forget (non-blocking)
               if (ragContext?.tempMessageId) {
-                promoteTempEmbedding(ragContext.tempMessageId)
-                  .catch(err => Sentry.captureException(err));
+                promoteTempEmbedding(ragContext.tempMessageId).catch(err => Sentry.captureException(err));
               }
-
-              // 2. Embed assistant response
               if (event.fullText) {
-                storeMessageEmbedding(user.id, event.fullText, conversationId, 'assistant')
+                storeMessageEmbedding(user!.id, event.fullText, conversationId, 'assistant')
                   .catch(err => Sentry.captureException(err, { tags: { action: 'embed_assistant' } }));
               }
-
-              // 3. Usage logging
               if (event.usage) {
-                supabase
-                  .from('usage_logs')
-                  .insert({
-                    user_id: user.id,
-                    model: actualModel,
-                    input_tokens: event.usage.inputTokens,
-                    output_tokens: event.usage.outputTokens,
-                    cost_usd: event.usage.cost,
-                    endpoint: 'chat',
-                  })
-                  .then(() => {});
+                supabase.from('usage_logs').insert({
+                  user_id: user!.id, model: actualModel,
+                  input_tokens: event.usage.inputTokens, output_tokens: event.usage.outputTokens,
+                  cost_usd: event.usage.cost, endpoint: 'chat',
+                }).then(() => {});
               }
-
-              // 4. Rolling summary (V4: incremental patching)
-              // First summary at message 6, then every 8 messages
               if (messageCount >= 6 && (messageCount === 6 || messageCount % 8 === 0)) {
-                generateRollingSummary(
-                  conversation?.summary,
-                  structuredSummary,
-                  recentHistory.slice(-5),
-                  message,
-                  event.fullText || ''
-                )
-                  .then(async ({ text, structured }) => {
-                    await saveStructuredSummary(conversationId, text, structured);
-                  })
+                generateRollingSummary(conversation?.summary, structuredSummary, recentHistory.slice(-5), message, event.fullText || '')
+                  .then(async ({ text, structured }) => { await saveStructuredSummary(conversationId, text, structured); })
                   .catch(err => Sentry.captureException(err));
               }
-
-              // 5. Working memory update every 3 messages or phase change
               if (messageCount % 3 === 0 || intent.workingMemoryPhase !== 'none') {
-                updateWorkingMemory(
-                  conversationId,
-                  [...recentHistory.slice(-5), { role: 'user', content: message }, { role: 'assistant', content: event.fullText || '' }],
-                  intent
-                ).catch(err => Sentry.captureException(err));
+                updateWorkingMemory(conversationId, [...recentHistory.slice(-5), { role: 'user', content: message }, { role: 'assistant', content: event.fullText || '' }], intent)
+                  .catch(err => Sentry.captureException(err));
               }
-
-              // 6. Extract memories every 5 messages (with V4 dedup)
               if (messageCount > 0 && messageCount % 5 === 0 && event.fullText) {
-                extractMemories(user.id, message, event.fullText, conversationId)
+                extractMemories(user!.id, message, event.fullText, conversationId)
                   .catch(err => Sentry.captureException(err, { tags: { action: 'extract_memories' } }));
               }
-
-              // 7. Anti-memory detection
               if (event.fullText) {
-                const lastAssistantMsg = recentHistory
-                  .filter(m => m.role === 'assistant')
-                  .pop();
+                const lastAssistantMsg = recentHistory.filter(m => m.role === 'assistant').pop();
                 if (lastAssistantMsg) {
-                  detectAntiMemory(message, lastAssistantMsg.content, user.id, conversationId)
-                    .catch(err => Sentry.captureException(err));
+                  detectAntiMemory(message, lastAssistantMsg.content, user!.id, conversationId).catch(err => Sentry.captureException(err));
                 }
               }
-
-              // 8. Conversation fingerprint update every 20 messages
               if (messageCount > 0 && messageCount % 20 === 0) {
-                updateConversationFingerprint(conversationId)
-                  .catch(err => Sentry.captureException(err));
+                updateConversationFingerprint(conversationId).catch(err => Sentry.captureException(err));
               }
-
-              // Auto-generate title for new conversations and send it back via SSE
               if (totalMessageCount === 0) {
                 generateTitle(message, event.fullText || '')
                   .then(async (title) => {
-                    await supabase
-                      .from('conversations')
-                      .update({
-                        title,
-                        topic: intent.mainTopic,
-                        model: actualModel,
-                      })
-                      .eq('id', conversationId);
-                    // Send title update to client
-                    try {
-                      controller.enqueue(
-                        encoder.encode(
-                          `data: ${JSON.stringify({ titleUpdate: title })}\n\n`
-                        )
-                      );
-                    } catch {
-                      // Controller may be closed already
-                    }
+                    await supabase.from('conversations').update({ title, topic: intent.mainTopic, model: actualModel }).eq('id', conversationId);
+                    try { sendSSE(controller, { titleUpdate: title }); } catch { /* controller may be closed */ }
                   })
                   .catch(err => Sentry.captureException(err));
               }
             }
 
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({ done: true, usage: event.usage })}\n\n`
-              )
-            );
+            sendSSE(controller, { done: true, usage: event.usage });
           }
         }
 
@@ -638,14 +628,10 @@ export async function POST(req: NextRequest) {
       } catch (error) {
         console.error('[Chat Stream Error]', error instanceof Error ? error.stack : error);
         Sentry.captureException(error, {
-          tags: { model: actualModel, action: 'stream' },
+          tags: { action: 'stream' },
           extra: { conversationId, messageLength: message.length },
         });
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({ error: 'An error occurred. Please try again.' })}\n\n`
-          )
-        );
+        sendSSE(controller, { error: 'An error occurred. Please try again.' });
       }
       controller.close();
     },

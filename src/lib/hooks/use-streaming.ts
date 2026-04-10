@@ -2,6 +2,7 @@
 
 import { useCallback, useRef } from 'react';
 import { useChatStore } from '@/lib/store/chat-store';
+import type { StreamingStatus } from '@/lib/store/chat-store';
 import type { ModelId } from '@/lib/utils/constants';
 import type { Message } from '@/lib/supabase/types';
 
@@ -19,7 +20,18 @@ interface SendMessageParams {
     data?: string;
   }>;
   onMessageSaved?: (userMessage: Message, assistantMessage: Message) => void;
+  onTitleUpdate?: (title: string) => void;
 }
+
+const STATUS_MAP: Record<string, StreamingStatus> = {
+  classifying: 'classifying',
+  searching_memory: 'searching_memory',
+  generating: 'generating',
+  processing: 'processing',
+  extracting_document: 'extracting_document',
+  extracting_pages: 'extracting_pages',
+  analyzing_images: 'analyzing_images',
+};
 
 export function useStreaming() {
   const routeOverrideRef = useRef<string | null>(null);
@@ -27,7 +39,10 @@ export function useStreaming() {
   const {
     isStreaming,
     streamingContent,
+    streamingStatus,
+    streamingStatusDetail,
     setStreaming,
+    setStreamingStatus,
     appendStreamingContent,
     clearStreamingContent,
     setAbortController,
@@ -35,11 +50,12 @@ export function useStreaming() {
   } = useChatStore();
 
   const sendMessage = useCallback(
-    async ({ message, conversationId, model, attachments, onMessageSaved }: SendMessageParams) => {
+    async ({ message, conversationId, model, attachments, onMessageSaved, onTitleUpdate }: SendMessageParams) => {
       // Reset state
       clearStreamingContent();
       routeOverrideRef.current = null;
       setStreaming(true);
+      setStreamingStatus('uploading');
 
       const abortController = new AbortController();
       setAbortController(abortController);
@@ -68,7 +84,6 @@ export function useStreaming() {
         if (contentType?.includes('application/json')) {
           const data = await response.json();
           if (data.type === 'image') {
-            // Create synthetic messages for the UI
             const userMsg: Message = {
               id: crypto.randomUUID(),
               conversation_id: conversationId,
@@ -133,6 +148,11 @@ export function useStreaming() {
             try {
               const parsed = JSON.parse(data);
 
+              // Handle status updates (real-time phase indicators)
+              if (parsed.status && STATUS_MAP[parsed.status]) {
+                setStreamingStatus(STATUS_MAP[parsed.status], parsed.statusDetail || null);
+              }
+
               if (parsed.routeOverride) {
                 routeOverrideRef.current = parsed.routeOverride;
               }
@@ -142,15 +162,18 @@ export function useStreaming() {
                 appendStreamingContent(parsed.text);
               }
 
+              // Handle title update
+              if (parsed.titleUpdate && onTitleUpdate) {
+                onTitleUpdate(parsed.titleUpdate);
+              }
+
               if (parsed.done) {
                 // Stream complete — create synthetic messages for immediate UI update
-                // Map attachments to include preview URLs for display
                 const displayAttachments = (attachments || []).map(a => ({
                   type: a.type,
                   name: a.name,
                   size: a.size,
                   url: a.url,
-                  // For images, create data URL for immediate preview if no storage URL
                   ...(a.type.startsWith('image/') && a.data && !a.url
                     ? { data: a.data }
                     : {}),
@@ -204,6 +227,7 @@ export function useStreaming() {
     [
       clearStreamingContent,
       setStreaming,
+      setStreamingStatus,
       setAbortController,
       appendStreamingContent,
     ]
@@ -212,6 +236,8 @@ export function useStreaming() {
   return {
     isStreaming,
     streamingContent,
+    streamingStatus,
+    streamingStatusDetail,
     routeOverride: routeOverrideRef.current,
     sendMessage,
     stopStreaming,
