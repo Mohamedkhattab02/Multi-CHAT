@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { Copy, Check, RefreshCw, Trash2, FileText, FileSpreadsheet, FileImage, File, Download, ExternalLink, X, ZoomIn } from 'lucide-react';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { ModelAvatar } from './ModelAvatar';
 import type { Message } from '@/lib/supabase/types';
 
 interface AttachmentData {
@@ -415,8 +416,8 @@ export const MessageBubble = memo(function MessageBubble({
           {/* Text bubble */}
           {message.content && (
             <div
-              className="rounded-2xl rounded-br-md px-4 py-3 text-sm bg-[var(--primary)] text-[var(--primary-foreground)] leading-relaxed"
-              style={{ overflow: 'hidden', wordBreak: 'break-word' }}
+              className="rounded-2xl rounded-br-md px-4 py-3 text-sm leading-relaxed"
+              style={{ overflow: 'hidden', wordBreak: 'break-word', backgroundColor: 'var(--user-bubble-bg)', color: 'var(--user-bubble-fg)' }}
             >
               <div dir="auto">{message.content}</div>
             </div>
@@ -447,11 +448,8 @@ export const MessageBubble = memo(function MessageBubble({
       onMouseLeave={() => setShowActions(false)}
     >
       {/* Model avatar */}
-      <div
-        className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 text-white text-[10px] font-bold"
-        style={{ backgroundColor: modelColor }}
-      >
-        {(model?.shortName ?? 'AI').charAt(0)}
+      <div className="mt-0.5">
+        <ModelAvatar model={message.model ?? ''} />
       </div>
 
       {/* Content */}

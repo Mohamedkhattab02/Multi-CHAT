@@ -4,6 +4,7 @@ import { ThemeProvider } from 'next-themes';
 import { QueryProvider } from '@/providers/QueryProvider';
 import { SentryProvider } from '@/providers/SentryProvider';
 import { ToastProvider } from '@/providers/ToastProvider';
+import { ModelThemeSync } from '@/components/ModelThemeSync';
 import './globals.css';
 
 const geistSans = Geist({
@@ -43,6 +44,7 @@ export default function RootLayout({
         >
           <QueryProvider>
             <SentryProvider>
+              <ModelThemeSync />
               {children}
               <ToastProvider />
             </SentryProvider>

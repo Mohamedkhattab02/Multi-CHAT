@@ -3,6 +3,7 @@
 import { memo } from 'react';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { ModelAvatar } from './ModelAvatar';
 import { Square } from 'lucide-react';
 import type { StreamingStatus } from '@/lib/store/chat-store';
 
@@ -55,11 +56,8 @@ export const StreamingMessage = memo(function StreamingMessage({
   return (
     <div className="flex gap-3">
       {/* Model avatar */}
-      <div
-        className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 text-white text-[10px] font-bold"
-        style={{ backgroundColor: displayModel?.color ?? modelColor }}
-      >
-        {(displayModel?.shortName ?? 'AI').charAt(0)}
+      <div className="mt-0.5">
+        <ModelAvatar model={routeOverride || model} />
       </div>
 
       {/* Streaming content */}

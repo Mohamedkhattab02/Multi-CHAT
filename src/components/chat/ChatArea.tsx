@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { type Conversation, type Message } from '@/lib/supabase/types';
 import { MODELS, type ModelId } from '@/lib/utils/constants';
 import { useSidebarStore } from '@/lib/store/sidebar-store';
@@ -9,10 +9,12 @@ import { useUiStore } from '@/lib/store/ui-store';
 import { useMessages } from '@/lib/hooks/use-messages';
 import { useStreaming } from '@/lib/hooks/use-streaming';
 import { MessageList } from './MessageList';
-import { ChatInput } from './ChatInput';
+import { ChatInput, type ChatInputHandle } from './ChatInput';
 import { EmptyState } from './EmptyState';
 import { ChatHeaderMenu } from './ChatHeaderMenu';
-import { PanelLeft, Share2 } from 'lucide-react';
+import { CodeSidePanel } from './CodeSidePanel';
+import { useCodePanelStore } from '@/lib/store/code-panel-store';
+import { PanelLeft, Share2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { uploadFile } from '@/lib/utils/upload-file';
 
@@ -143,8 +145,68 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
     [displayMessages, handleDeleteMessage, handleSend]
   );
 
+  const isCodePanelOpen = useCodePanelStore((s) => s.isOpen);
+  const codePanelWidth = useCodePanelStore((s) => s.width);
+
+  // ── Drag & drop files onto entire chat area ──
+  const chatInputRef = useRef<ChatInputHandle>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    dragCounterRef.current = 0;
+
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0 && chatInputRef.current) {
+      chatInputRef.current.addFiles(files);
+    }
+  }, []);
+
   return (
-    <div className="flex flex-col h-full">
+    <div
+      className="flex h-full relative"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {/* Drop overlay — covers entire chat area */}
+      {isDragging && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-[var(--primary)]/10 border-2 border-dashed border-[var(--primary)] rounded-xl backdrop-blur-[2px] pointer-events-none">
+          <div className="flex flex-col items-center gap-2 text-[var(--primary)]">
+            <Upload className="w-10 h-10" />
+            <span className="text-base font-medium">Drop files here to attach</span>
+          </div>
+        </div>
+      )}
+      {/* Main chat column */}
+      <div className={`flex flex-col flex-1 min-w-0 h-full`} style={isCodePanelOpen ? { maxWidth: `calc(100% - ${codePanelWidth}px)` } : undefined}>
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-2.5 border-b border-[var(--border)] bg-[var(--card)]">
         {!isOpen && (
@@ -196,11 +258,26 @@ export function ChatArea({ conversation, initialMessages, userId }: ChatAreaProp
 
       {/* Chat input */}
       <ChatInput
+        ref={chatInputRef}
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
         onSend={handleSend}
         isStreaming={isStreaming}
       />
+      </div>
+
+      {/* Code side panel */}
+      {isCodePanelOpen && (
+        <div className="hidden lg:flex flex-shrink-0" style={{ width: codePanelWidth }}>
+          <CodeSidePanel />
+        </div>
+      )}
+      {/* Mobile: render as overlay */}
+      {isCodePanelOpen && (
+        <div className="lg:hidden">
+          <CodeSidePanel />
+        </div>
+      )}
     </div>
   );
 }

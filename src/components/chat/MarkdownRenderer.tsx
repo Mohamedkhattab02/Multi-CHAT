@@ -48,7 +48,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
             }
 
             return (
-              <Suspense fallback={<pre className="my-3 p-4 rounded-lg bg-[#0d1117] text-gray-200 text-sm overflow-x-auto"><code>{codeString}</code></pre>}>
+              <Suspense fallback={<pre className="my-3 p-4 rounded-lg text-sm overflow-x-auto" style={{ backgroundColor: 'var(--code-bg)', color: 'var(--code-fg)' }}><code>{codeString}</code></pre>}>
                 <CodeBlock code={codeString} language={match?.[1]} />
               </Suspense>
             );

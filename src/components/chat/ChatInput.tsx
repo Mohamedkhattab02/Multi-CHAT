@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, useEffect, useImperativeHandle, forwardRef } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
@@ -24,6 +24,10 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+export interface ChatInputHandle {
+  addFiles: (files: File[]) => void;
+}
+
 interface ChatInputProps {
   selectedModel: ModelId;
   onModelChange: (model: ModelId) => void;
@@ -32,13 +36,13 @@ interface ChatInputProps {
   disabled?: boolean;
 }
 
-export function ChatInput({
+export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
   selectedModel,
   onModelChange,
   onSend,
   isStreaming,
   disabled = false,
-}: ChatInputProps) {
+}, ref) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -137,6 +141,62 @@ export function ChatInput({
       return prev.filter((_, i) => i !== index);
     });
   }, []);
+
+  // ── Shared helper: add files from any source (paste, drop, file input) ──
+  const addFiles = useCallback(
+    (files: File[]) => {
+      for (const file of files) {
+        if (attachments.length >= MAX_ATTACHMENTS) {
+          toast.error(`Maximum ${MAX_ATTACHMENTS} files allowed`);
+          break;
+        }
+        if (file.size > MAX_FILE_SIZE) {
+          toast.error(`${file.name} is too large (max 100MB)`);
+          continue;
+        }
+        const attachment: Attachment = {
+          file,
+          type: file.type,
+          name: file.name,
+          size: file.size,
+        };
+        if (file.type.startsWith('image/')) {
+          attachment.preview = URL.createObjectURL(file);
+        }
+        setAttachments((prev) => [...prev, attachment]);
+      }
+    },
+    [attachments.length]
+  );
+
+  // Expose addFiles to parent (for drag & drop on full chat area)
+  useImperativeHandle(ref, () => ({ addFiles }), [addFiles]);
+
+  // ── Feature 1: Paste image from clipboard ──
+  useEffect(() => {
+    const editorEl = editor?.view?.dom;
+    if (!editorEl) return;
+
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      const files: File[] = [];
+      for (const item of Array.from(items)) {
+        if (item.kind === 'file') {
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+      if (files.length > 0) {
+        e.preventDefault();
+        addFiles(files);
+      }
+    };
+
+    editorEl.addEventListener('paste', handlePaste);
+    return () => editorEl.removeEventListener('paste', handlePaste);
+  }, [editor, addFiles]);
 
   const hasContent = editor?.getText().trim().length || attachments.length > 0;
 
@@ -314,4 +374,4 @@ export function ChatInput({
       </div>
     </div>
   );
-}
+});

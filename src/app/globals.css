@@ -54,6 +54,19 @@
   --model-gemini: #3b82f6;
   --model-glm: #8b5cf6;
 
+  /* Model-theme defaults (overridden by .theme-*) */
+  --model-accent: #2563eb;
+  --user-bubble-bg: #2563eb;
+  --user-bubble-fg: #ffffff;
+  --assistant-bg: transparent;
+  --assistant-fg: #0f172a;
+  --code-bg: #1e293b;
+  --code-header-bg: #0f172a;
+  --code-fg: #e2e8f0;
+  --code-line-nr: #475569;
+  --code-border: #334155;
+  --input-border-focus: #2563eb;
+
   /* Spacing & radius */
   --radius: 0.75rem;
   --radius-lg: 1rem;
@@ -102,6 +115,213 @@
   --glass-bg: rgba(22, 22, 26, 0.8);
   --glass-border: rgba(255, 255, 255, 0.06);
   --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+
+  --model-accent: #3b82f6;
+  --user-bubble-bg: #3b82f6;
+  --user-bubble-fg: #ffffff;
+  --assistant-bg: transparent;
+  --assistant-fg: #f1f5f9;
+  --code-bg: #0d1117;
+  --code-header-bg: #161b22;
+  --code-fg: #e6edf3;
+  --code-line-nr: #484f58;
+  --code-border: #30363d;
+  --input-border-focus: #3b82f6;
+}
+
+/* ============================================================
+   Model Themes — Gemini (Google style)
+   ============================================================ */
+
+.theme-gemini {
+  --primary: #1a73e8;
+  --primary-foreground: #ffffff;
+  --ring: #1a73e8;
+  --sidebar-active: #e8f0fe;
+  --model-accent: #1a73e8;
+  --model-gpt: #1a73e8;
+  --model-gemini: #1a73e8;
+  --model-glm: #1a73e8;
+  --user-bubble-bg: #d3e3fd;
+  --user-bubble-fg: #041e49;
+  --assistant-bg: transparent;
+  --assistant-fg: #1f1f1f;
+  --code-bg: #f0f4f9;
+  --code-header-bg: #dfe5ed;
+  --code-fg: #1f1f1f;
+  --code-line-nr: #80868b;
+  --code-border: #c4c7cc;
+  --input-border-focus: #1a73e8;
+}
+
+.theme-gemini.dark {
+  --primary: #8ab4f8;
+  --primary-foreground: #1a1a1a;
+  --model-gpt: #8ab4f8;
+  --model-gemini: #8ab4f8;
+  --model-glm: #8ab4f8;
+  --background: #131314;
+  --foreground: #e3e3e3;
+  --card: #1e1f20;
+  --card-foreground: #e3e3e3;
+  --popover: #1e1f20;
+  --popover-foreground: #e3e3e3;
+  --secondary: #282a2c;
+  --secondary-foreground: #e3e3e3;
+  --muted: #282a2c;
+  --muted-foreground: #9aa0a6;
+  --accent: #303134;
+  --accent-foreground: #e3e3e3;
+  --border: #3c4043;
+  --input: #3c4043;
+  --ring: #8ab4f8;
+  --sidebar-bg: #1e1f20;
+  --sidebar-border: #3c4043;
+  --sidebar-hover: #282a2c;
+  --sidebar-active: #394457;
+  --glass-bg: rgba(30, 31, 32, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.06);
+  --model-accent: #8ab4f8;
+  --user-bubble-bg: #004a77;
+  --user-bubble-fg: #e3e3e3;
+  --assistant-bg: transparent;
+  --assistant-fg: #e3e3e3;
+  --code-bg: #1e1f20;
+  --code-header-bg: #282a2c;
+  --code-fg: #e3e3e3;
+  --code-line-nr: #5f6368;
+  --code-border: #3c4043;
+  --input-border-focus: #8ab4f8;
+}
+
+/* ============================================================
+   Model Themes — ChatGPT (OpenAI style)
+   ============================================================ */
+
+.theme-gpt {
+  --primary: #10a37f;
+  --primary-foreground: #ffffff;
+  --ring: #10a37f;
+  --sidebar-active: #eef7f4;
+  --model-accent: #10a37f;
+  --model-gpt: #10a37f;
+  --model-gemini: #10a37f;
+  --model-glm: #10a37f;
+  --user-bubble-bg: #d1fae5;
+  --user-bubble-fg: #064e3b;
+  --assistant-bg: #f9fafb;
+  --assistant-fg: #111827;
+  --code-bg: #f3f4f6;
+  --code-header-bg: #e5e7eb;
+  --code-fg: #111827;
+  --code-line-nr: #9ca3af;
+  --code-border: #d1d5db;
+  --input-border-focus: #10a37f;
+}
+
+.theme-gpt.dark {
+  --primary: #10a37f;
+  --primary-foreground: #ffffff;
+  --model-gpt: #10a37f;
+  --model-gemini: #10a37f;
+  --model-glm: #10a37f;
+  --background: #212121;
+  --foreground: #ececec;
+  --card: #2f2f2f;
+  --card-foreground: #ececec;
+  --popover: #2f2f2f;
+  --popover-foreground: #ececec;
+  --secondary: #383838;
+  --secondary-foreground: #ececec;
+  --muted: #383838;
+  --muted-foreground: #b4b4b4;
+  --accent: #424242;
+  --accent-foreground: #ececec;
+  --border: #424242;
+  --input: #424242;
+  --ring: #10a37f;
+  --sidebar-bg: #171717;
+  --sidebar-border: #2f2f2f;
+  --sidebar-hover: #2f2f2f;
+  --sidebar-active: #10a37f20;
+  --glass-bg: rgba(47, 47, 47, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.06);
+  --model-accent: #10a37f;
+  --user-bubble-bg: #2f2f2f;
+  --user-bubble-fg: #ececec;
+  --assistant-bg: transparent;
+  --assistant-fg: #ececec;
+  --code-bg: #1a1a1a;
+  --code-header-bg: #2f2f2f;
+  --code-fg: #ececec;
+  --code-line-nr: #6b6b6b;
+  --code-border: #383838;
+  --input-border-focus: #10a37f;
+}
+
+/* ============================================================
+   Model Themes — GLM (ZhipuAI style)
+   ============================================================ */
+
+.theme-glm {
+  --primary: #7c3aed;
+  --primary-foreground: #ffffff;
+  --ring: #7c3aed;
+  --sidebar-active: #f3f0ff;
+  --model-accent: #7c3aed;
+  --model-gpt: #7c3aed;
+  --model-gemini: #7c3aed;
+  --model-glm: #7c3aed;
+  --user-bubble-bg: #ede9fe;
+  --user-bubble-fg: #3b0764;
+  --assistant-bg: transparent;
+  --assistant-fg: #1c1917;
+  --code-bg: #faf5ff;
+  --code-header-bg: #ede9fe;
+  --code-fg: #1c1917;
+  --code-line-nr: #a78bfa;
+  --code-border: #d8b4fe;
+  --input-border-focus: #7c3aed;
+}
+
+.theme-glm.dark {
+  --primary: #a78bfa;
+  --primary-foreground: #1a1a1a;
+  --model-gpt: #a78bfa;
+  --model-gemini: #a78bfa;
+  --model-glm: #a78bfa;
+  --background: #0f0a1a;
+  --foreground: #e8e0f0;
+  --card: #1a1228;
+  --card-foreground: #e8e0f0;
+  --popover: #1a1228;
+  --popover-foreground: #e8e0f0;
+  --secondary: #231a36;
+  --secondary-foreground: #e8e0f0;
+  --muted: #231a36;
+  --muted-foreground: #9b8db8;
+  --accent: #2d2244;
+  --accent-foreground: #e8e0f0;
+  --border: #2d2244;
+  --input: #2d2244;
+  --ring: #a78bfa;
+  --sidebar-bg: #120e1e;
+  --sidebar-border: #231a36;
+  --sidebar-hover: #231a36;
+  --sidebar-active: #7c3aed25;
+  --glass-bg: rgba(26, 18, 40, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.06);
+  --model-accent: #a78bfa;
+  --user-bubble-bg: #2d1a4e;
+  --user-bubble-fg: #e8e0f0;
+  --assistant-bg: transparent;
+  --assistant-fg: #e8e0f0;
+  --code-bg: #1a1228;
+  --code-header-bg: #231a36;
+  --code-fg: #e8e0f0;
+  --code-line-nr: #6d5a8a;
+  --code-border: #2d2244;
+  --input-border-focus: #a78bfa;
 }
 
 /* ============================================================
@@ -113,6 +333,19 @@
 html {
   height: 100%;
   -webkit-text-size-adjust: 100%;
+}
+
+/* Smooth model-theme transitions */
+html.theme-gemini,
+html.theme-gpt,
+html.theme-glm {
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+html.theme-gemini *,
+html.theme-gpt *,
+html.theme-glm * {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.15s ease;
 }
 
 body {
@@ -182,7 +415,7 @@ body {
   animation: blink 1s ease-in-out infinite;
   margin-left: 1px;
   font-size: 0.8em;
-  color: var(--primary);
+  color: var(--model-accent);
 }
 
 /* ============================================================
@@ -262,9 +495,7 @@ body {
    ============================================================ */
 
 .gradient-text {
-  background: linear-gradient(135deg, var(--model-gpt), var(--model-gemini), var(--model-glm));
-  background-size: 200% 200%;
-  animation: gradient-shift 5s ease infinite;
+  background: linear-gradient(135deg, var(--model-accent), color-mix(in srgb, var(--model-accent) 60%, var(--foreground)));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
