@@ -4,6 +4,9 @@ import { withSentryConfig } from '@sentry/nextjs';
 const nextConfig: NextConfig = {
   reactCompiler: true,
 
+  // Allow cross-origin requests from any source in dev (iframe previews, etc.)
+  allowedDevOrigins: ['localhost', '127.0.0.1', '0.0.0.0'],
+
   // pdf-parse-new uses dynamic requires that break webpack bundling
   serverExternalPackages: ['pdf-parse-new'],
 

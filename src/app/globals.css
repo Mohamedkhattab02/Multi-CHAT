@@ -60,11 +60,11 @@
   --user-bubble-fg: #ffffff;
   --assistant-bg: transparent;
   --assistant-fg: #0f172a;
-  --code-bg: #1e293b;
-  --code-header-bg: #0f172a;
-  --code-fg: #e2e8f0;
-  --code-line-nr: #475569;
-  --code-border: #334155;
+  --code-bg: #f1f5f9;
+  --code-header-bg: #e2e8f0;
+  --code-fg: #0f172a;
+  --code-line-nr: #64748b;
+  --code-border: #cbd5e1;
   --input-border-focus: #2563eb;
 
   /* Spacing & radius */
